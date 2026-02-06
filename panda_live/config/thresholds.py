@@ -11,6 +11,18 @@ WINDOW_5MIN: int = 300
 WINDOW_15MIN: int = 900
 EARLY_WINDOW: int = 300  # First 5 minutes after token birth
 
+# Coordination
+COORDINATION_MIN_WALLETS: int = 3
+COORDINATION_TIME_WINDOW: int = 60  # seconds
+
+# Persistence
+PERSISTENCE_MIN_APPEARANCES: int = 2  # distinct 1-min buckets
+PERSISTENCE_MAX_GAP: int = 300  # 5 minutes
+
+# Exhaustion
+EXHAUSTION_SILENCE_THRESHOLD: int = 180  # 3 minutes
+EXHAUSTION_EARLY_WALLET_PERCENT: float = 0.60  # 60%
+
 # Session Logging
 LOG_LEVEL_DEFAULT: str = "INTELLIGENCE_ONLY"
 LOG_FORMAT: str = "JSONL"

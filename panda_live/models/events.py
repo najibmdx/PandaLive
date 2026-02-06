@@ -1,7 +1,7 @@
 """Event data models for PANDA LIVE."""
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Dict, List, Literal
 
 
 @dataclass
@@ -14,6 +14,21 @@ class FlowEvent:
     amount_sol: float
     signature: str  # Transaction signature
     token_ca: str  # Token mint address
+
+
+@dataclass
+class WalletSignalEvent:
+    """Wallet behavioral signal detection event.
+
+    Signals are observations with structured context, not bare metrics.
+    Each signal includes details providing breakdown of what was detected.
+    """
+
+    wallet: str  # Full 44-char Solana address
+    timestamp: int
+    token_ca: str
+    signals: List[str]  # e.g., ["TIMING", "COORDINATION"]
+    details: Dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass

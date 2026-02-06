@@ -33,3 +33,6 @@ class WalletState:
     whale_tx_fired: bool = False
     whale_cum_5m_fired: bool = False
     whale_cum_15m_fired: bool = False
+
+    # Signal detection state
+    timing_checked: bool = False

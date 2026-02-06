@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
 
-from ..models.events import FlowEvent, WhaleEvent
+from ..models.events import FlowEvent, WhaleEvent, WalletSignalEvent
 from ..config.thresholds import LOG_LEVEL_DEFAULT, LOG_DIR
 
 
@@ -72,6 +72,17 @@ class SessionLogger:
             "amount_sol": whale.amount_sol,
             "threshold": whale.threshold,
             "token_ca": whale.token_ca,
+        })
+
+    def log_wallet_signal(self, signal_event: WalletSignalEvent) -> None:
+        """Log wallet signal event (always logged, even in INTELLIGENCE_ONLY mode)."""
+        self._write_line({
+            "event_type": "WALLET_SIGNAL",
+            "timestamp": signal_event.timestamp,
+            "token_ca": signal_event.token_ca,
+            "wallet": signal_event.wallet,
+            "signals": signal_event.signals,
+            "details": signal_event.details,
         })
 
     def log_session_end(self, reason: str) -> None:
