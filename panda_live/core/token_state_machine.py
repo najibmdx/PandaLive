@@ -22,6 +22,7 @@ from ..config.thresholds import (
 )
 from ..core.density_tracker import DensityTracker
 from ..core.episode_tracker import EpisodeTracker
+from ..core.severity_calculator import SeverityCalculator
 from ..core.signal_aggregator import SignalAggregator
 from ..models.events import StateTransitionEvent
 from ..models.token_state import TokenState
@@ -33,6 +34,7 @@ class TokenStateMachine:
     def __init__(self) -> None:
         self.episode_tracker = EpisodeTracker()
         self.density_tracker = DensityTracker()
+        self.severity_calculator = SeverityCalculator()
 
     def evaluate_transition(
         self,
@@ -231,14 +233,15 @@ class TokenStateMachine:
     ) -> StateTransitionEvent:
         """Execute an atomic state transition.
 
-        Updates token_state in-place and returns the transition event.
+        Updates token_state in-place, computes severity, and returns
+        the transition event with severity attached to details.
         """
         from_state = token_state.current_state
         token_state.previous_state = from_state
         token_state.current_state = new_state
         token_state.state_changed_at = current_time
 
-        return StateTransitionEvent(
+        event = StateTransitionEvent(
             token_ca=token_state.ca,
             timestamp=current_time,
             episode_id=token_state.episode_id,
@@ -247,6 +250,13 @@ class TokenStateMachine:
             trigger=trigger,
             details=details,
         )
+
+        # Compute and attach severity (non-invasive)
+        severity = self.severity_calculator.compute_severity(event, token_state)
+        if severity is not None:
+            event.details["severity"] = severity
+
+        return event
 
     def _count_coordinated_wallets(self, token_state: TokenState) -> int:
         """Count early wallets (proxy for coordination in current episode)."""
