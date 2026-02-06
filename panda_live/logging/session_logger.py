@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
 
-from ..models.events import FlowEvent, WhaleEvent, WalletSignalEvent
+from ..models.events import FlowEvent, WhaleEvent, WalletSignalEvent, StateTransitionEvent
 from ..config.thresholds import LOG_LEVEL_DEFAULT, LOG_DIR
 
 
@@ -83,6 +83,19 @@ class SessionLogger:
             "wallet": signal_event.wallet,
             "signals": signal_event.signals,
             "details": signal_event.details,
+        })
+
+    def log_state_transition(self, transition: StateTransitionEvent) -> None:
+        """Log state transition event (always logged, even in INTELLIGENCE_ONLY mode)."""
+        self._write_line({
+            "event_type": "STATE_TRANSITION",
+            "timestamp": transition.timestamp,
+            "token_ca": transition.token_ca,
+            "episode_id": transition.episode_id,
+            "from_state": transition.from_state,
+            "to_state": transition.to_state,
+            "trigger": transition.trigger,
+            "details": transition.details,
         })
 
     def log_session_end(self, reason: str) -> None:

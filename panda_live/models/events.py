@@ -41,3 +41,20 @@ class WhaleEvent:
     amount_sol: float
     threshold: float
     token_ca: str
+
+
+@dataclass
+class StateTransitionEvent:
+    """Token state transition event.
+
+    Represents an atomic state change in the token state machine,
+    including episode context and the trigger that caused the transition.
+    """
+
+    token_ca: str
+    timestamp: int
+    episode_id: int
+    from_state: str
+    to_state: str
+    trigger: str  # Human-readable trigger description
+    details: dict = field(default_factory=dict)
