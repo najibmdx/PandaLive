@@ -8,6 +8,7 @@ compressed intelligence WITH structural breakdowns.
 import time
 from typing import Dict, List, Optional, Tuple
 
+from ..config.thresholds import MAX_EVENT_BUFFER_BYTES, MAX_WALLET_LINES
 from ..models.events import StateTransitionEvent, WalletSignalEvent
 from ..models.token_state import TokenState
 from ..models.wallet_state import WalletState
@@ -142,21 +143,35 @@ class WalletPanel:
         lines.append(f" Active:{active} | Early:{early}{early_pct} | Persist:{persistent}")
         lines.append("")
 
-        # Wallet details with signals
-        for addr, signals in sorted(wallet_signals.items(), key=lambda x: len(x[1]), reverse=True):
+        # Wallet details with signals (capped to MAX_WALLET_LINES)
+        sorted_wallets = sorted(
+            wallet_signals.items(), key=lambda x: len(x[1]), reverse=True
+        )
+        rendered_count = 0
+        total_with_signals = len([w for w in sorted_wallets if w[1]])
+
+        for wallet_addr, signals in sorted_wallets:
+            if rendered_count >= MAX_WALLET_LINES:
+                break
+            if len(lines) >= max_lines - 2:
+                break
+            if not signals:
+                continue
+
+            name = self.wallet_names.get(wallet_addr, "")
+            name_str = f" ({name})" if name else ""
+            lines.append(f" {wallet_addr}{name_str}:")
+
             if len(lines) >= max_lines - 1:
                 break
 
-            name = self.wallet_names.get(addr, "")
-            name_str = f" ({name})" if name else ""
-            lines.append(f" {addr}{name_str}:")
-
-            if len(lines) >= max_lines:
-                break
-
-            # Format signal flags as compact tags
             flags = "".join(f"[{s[:5].upper()}]" for s in signals)
             lines.append(f"   {flags}")
+            rendered_count += 1
+
+        remaining = total_with_signals - rendered_count
+        if remaining > 0:
+            lines.append(f" (+{remaining} more wallets not shown)")
 
         # Pad to max_lines
         while len(lines) < max_lines:
@@ -171,6 +186,8 @@ class EventPanel:
     def __init__(self, buffer_size: int = 100) -> None:
         self._events: List[str] = []
         self._buffer_size = buffer_size
+        self._buffer_bytes: int = 0
+        self._max_buffer_bytes: int = MAX_EVENT_BUFFER_BYTES
 
     def add_state_transition(self, transition: StateTransitionEvent) -> None:
         """Add a state transition event to the stream."""
@@ -208,7 +225,15 @@ class EventPanel:
         return lines[:max_lines]
 
     def _append(self, event_str: str) -> None:
-        """Append event and enforce buffer size."""
+        """Append event and enforce both count and byte caps."""
+        event_bytes = len(event_str.encode("utf-8", errors="replace"))
         self._events.append(event_str)
-        if len(self._events) > self._buffer_size:
-            self._events = self._events[-self._buffer_size:]
+        self._buffer_bytes += event_bytes
+
+        # Evict oldest until both caps satisfied
+        while self._events and (
+            len(self._events) > self._buffer_size
+            or self._buffer_bytes > self._max_buffer_bytes
+        ):
+            removed = self._events.pop(0)
+            self._buffer_bytes -= len(removed.encode("utf-8", errors="replace"))

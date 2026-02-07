@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
 
 from ..models.events import FlowEvent, WhaleEvent, WalletSignalEvent, StateTransitionEvent
-from ..config.thresholds import LOG_LEVEL_DEFAULT, LOG_DIR
+from ..config.thresholds import LOG_LEVEL_DEFAULT, LOG_DIR, MAX_DETAIL_CHARS, COORDINATION_SAMPLE_WALLETS
 
 
 class SessionLogger:
@@ -32,10 +32,30 @@ class SessionLogger:
         self._filepath = self._dir / filename
         self._file: Optional[TextIO] = open(self._filepath, "a", encoding="utf-8")
 
+    @staticmethod
+    def _cap_details(details: Any) -> Any:
+        """Recursively cap details to bounded size for safe serialization."""
+        if isinstance(details, dict):
+            capped = {}
+            for k, v in details.items():
+                capped[k] = SessionLogger._cap_details(v)
+            return capped
+        if isinstance(details, list):
+            # Cap list length (use COORDINATION_SAMPLE_WALLETS as general list cap)
+            capped_list = details[:COORDINATION_SAMPLE_WALLETS]
+            return [SessionLogger._cap_details(item) for item in capped_list]
+        if isinstance(details, str) and len(details) > MAX_DETAIL_CHARS:
+            return details[:MAX_DETAIL_CHARS] + "..."
+        return details
+
     def _write_line(self, data: Dict[str, Any]) -> None:
-        """Write a single JSON line to the log file."""
+        """Write a single bounded JSON line to the log file."""
         if self._file and not self._file.closed:
-            self._file.write(json.dumps(data, separators=(",", ":")) + "\n")
+            # Cap any details field before serialization
+            if "details" in data:
+                data["details"] = self._cap_details(data["details"])
+            line = json.dumps(data, separators=(",", ":"))
+            self._file.write(line + "\n")
             self._file.flush()
 
     def log_session_start(self, config: Dict[str, Any]) -> None:

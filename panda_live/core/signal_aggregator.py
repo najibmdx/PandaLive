@@ -6,6 +6,7 @@ WalletSignalEvent objects with structured context.
 
 from typing import List, Optional
 
+from ..config.thresholds import COORDINATION_SAMPLE_WALLETS
 from ..models.events import WhaleEvent, WalletSignalEvent
 from ..models.token_state import TokenState
 from ..models.wallet_state import WalletState
@@ -65,11 +66,11 @@ class SignalAggregator:
         )
         if is_coord:
             signals.append("COORDINATION")
+            others = [w for w in coordinated_wallets if w != wallet_state.address]
             details["coordination"] = {
-                "coordinated_with": [
-                    w for w in coordinated_wallets if w != wallet_state.address
-                ],
-                "time_window": 60,
+                "wallet_count": len(coordinated_wallets),
+                "time_window_s": 60,
+                "sample_wallets": others[:COORDINATION_SAMPLE_WALLETS],
             }
 
         # 3. PERSISTENCE
