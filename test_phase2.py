@@ -192,7 +192,7 @@ def test_signal_aggregator():
     sig_c = aggregator.process_whale_event(whale_events_c[0], ws_c, ts, 1140)
     assert "TIMING" in sig_c.signals
     assert "COORDINATION" in sig_c.signals
-    assert len(sig_c.details["coordination"]["coordinated_with"]) == 2  # A and B
+    assert len(sig_c.details["coordination"]["sample_wallets"]) == 2  # A and B
     print(f"  Wallet C signals: {sig_c.signals}: OK")
     print(f"    coordination details: {sig_c.details['coordination']}")
 
@@ -216,7 +216,7 @@ def test_signal_logging():
             signals=["TIMING", "COORDINATION"],
             details={
                 "timing": {"is_early": True, "delta_seconds": 100},
-                "coordination": {"coordinated_with": [WALLET_B, WALLET_C], "time_window": 60},
+                "coordination": {"wallet_count": 3, "time_window_s": 60, "sample_wallets": [WALLET_B, WALLET_C]},
             },
         )
         logger.log_wallet_signal(sig)
@@ -226,7 +226,7 @@ def test_signal_logging():
         assert len(events) == 3  # START + WALLET_SIGNAL + END
         assert events[1]["event_type"] == "WALLET_SIGNAL"
         assert events[1]["signals"] == ["TIMING", "COORDINATION"]
-        assert events[1]["details"]["coordination"]["coordinated_with"][0] == WALLET_B
+        assert events[1]["details"]["coordination"]["sample_wallets"][0] == WALLET_B
         print(f"  INTELLIGENCE_ONLY logs signals: {len(events)} events: OK")
         print(f"    Signal event: signals={events[1]['signals']}")
 

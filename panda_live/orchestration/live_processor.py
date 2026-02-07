@@ -14,7 +14,7 @@ import time
 from typing import List, Optional
 
 from ..cli.renderer import CLIRenderer
-from ..config.thresholds import EARLY_WINDOW
+from ..config.thresholds import EARLY_WINDOW, MAX_ACTIVE_WALLETS
 from ..core.signal_aggregator import SignalAggregator
 from ..core.time_windows import TimeWindowManager
 from ..core.token_state_machine import TokenStateMachine
@@ -145,9 +145,10 @@ class LiveProcessor:
         if self.token_state.t0 is None:
             self.token_state.t0 = current_time
 
-        # Get or create wallet state
+        # Get or create wallet state (with LRU eviction at cap)
         wallet = flow.wallet
         if wallet not in self.token_state.active_wallets:
+            self._enforce_wallet_cap()
             ws = WalletState(address=wallet)
             self.token_state.active_wallets[wallet] = ws
         else:
@@ -214,6 +215,18 @@ class LiveProcessor:
         current_time = int(time.time())
         frame = self.renderer.render_frame(self.token_state, current_time)
         self.renderer.display(frame)
+
+    def _enforce_wallet_cap(self) -> None:
+        """Evict least-recently-seen wallets when at capacity."""
+        active = self.token_state.active_wallets
+        if len(active) < MAX_ACTIVE_WALLETS:
+            return
+        # Sort by last_seen ascending, evict oldest
+        by_lru = sorted(active.items(), key=lambda kv: kv[1].last_seen)
+        to_evict = len(active) - MAX_ACTIVE_WALLETS + 1  # Make room for 1 new
+        for addr, _ in by_lru[:to_evict]:
+            del active[addr]
+            self.token_state.early_wallets.discard(addr)
 
     def shutdown(self) -> None:
         """Clean shutdown: close logger, clear state."""

@@ -35,6 +35,13 @@ PRESSURE_PEAKING_WINDOW: int = 120  # 2 minutes
 DISSIPATION_WHALE_THRESHOLD: int = 1  # <1 whale per lookback = dissipation
 DISSIPATION_LOOKBACK: int = 300  # 5 minutes
 
+# Scalability Caps
+MAX_ACTIVE_WALLETS: int = 200
+MAX_WALLET_LINES: int = 10
+MAX_EVENT_BUFFER_BYTES: int = 256_000  # 256 KB
+MAX_DETAIL_CHARS: int = 320
+COORDINATION_SAMPLE_WALLETS: int = 5
+
 # Session Logging
 LOG_LEVEL_DEFAULT: str = "INTELLIGENCE_ONLY"
 LOG_FORMAT: str = "JSONL"
