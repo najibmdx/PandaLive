@@ -97,13 +97,14 @@ class TokenPanel:
 
         # Line 4: Capital: PRESENT | Active: X | Early: X (pct%) | Persist: X
         active = len(token_state.active_wallets)
-        early = len(token_state.early_wallets)
+        active_addrs = set(token_state.active_wallets.keys())
+        early_active = len(active_addrs.intersection(token_state.early_wallets))
         persistent = sum(
             1 for ws in token_state.active_wallets.values()
             if len(ws.minute_buckets) >= 2
         )
-        early_pct = f"({early * 100 // active}%)" if active > 0 else "(0%)"
-        lines.append(f" Capital: PRESENT | Active: {active} | Early: {early} {early_pct} | Persist: {persistent}")
+        early_pct = f"({early_active * 100 // active}%)" if active > 0 else "(0%)"
+        lines.append(f" Capital: PRESENT | Active: {active} | Early: {early_active} {early_pct} | Persist: {persistent}")
 
         # Line 5: Pressure: → | Silent: X/Y | Repl: YES|NO
         silent_x, silent_y, _ = token_state.compute_silent(current_time)
@@ -170,13 +171,14 @@ class WalletPanel:
 
         # Line 1: Active: X | Early: X (pct%) | Persist: X
         active = len(token_state.active_wallets)
-        early = len(token_state.early_wallets)
+        active_addrs = set(token_state.active_wallets.keys())
+        early_active = len(active_addrs.intersection(token_state.early_wallets))
         persistent = sum(
             1 for ws in token_state.active_wallets.values()
             if len(ws.minute_buckets) >= 2
         )
-        early_pct = f"({early * 100 // active}%)" if active > 0 else "(0%)"
-        lines.append(f" Active: {active} | Early: {early} {early_pct} | Persist: {persistent}")
+        early_pct = f"({early_active * 100 // active}%)" if active > 0 else "(0%)"
+        lines.append(f" Active: {active} | Early: {early_active} {early_pct} | Persist: {persistent}")
 
         # Line 2: blank
         lines.append("")
