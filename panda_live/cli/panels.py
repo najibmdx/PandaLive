@@ -15,7 +15,7 @@ from ..models.wallet_state import WalletState
 
 # State -> Phase mapping (deterministic, no logic invented)
 _STATE_TO_PHASE = {
-    "TOKEN_QUIET": "",
+    "TOKEN_QUIET": "Dying",
     "TOKEN_IGNITION": "Early",
     "TOKEN_COORDINATION_SPIKE": "Early",
     "TOKEN_EARLY_PHASE": "Early",
@@ -108,7 +108,7 @@ class TokenPanel:
 
         # Line 5: Pressure: → | Silent: X/Y | Repl: YES|NO
         silent_x, silent_y, _ = token_state.compute_silent(current_time)
-        replacement = token_state.compute_replacement(current_time)
+        replacement = token_state.compute_replacement(current_time) if early_active > 0 else "NO"
         lines.append(f" Pressure: \u2192 | Silent: {silent_x}/{silent_y} | Repl: {replacement}")
 
         # Line 6: HB | Whale: Ns | Tx: Ns
@@ -188,6 +188,7 @@ class WalletPanel:
             wallet_signals.items(), key=lambda x: len(x[1]), reverse=True
         )
         rendered_count = 0
+        rendered_addrs: set = set()
 
         for wallet_addr, signals in sorted_wallets:
             if rendered_count >= _WALLET_DISPLAY_CAP:
@@ -211,9 +212,38 @@ class WalletPanel:
                 age_str = f"   {age}s"
             lines.append(f"   {flags}{age_str}")
             rendered_count += 1
+            rendered_addrs.add(wallet_addr)
+
+        # Fill remaining slots with most recently seen active wallets (no tags)
+        if rendered_count < _WALLET_DISPLAY_CAP:
+            filler_wallets = sorted(
+                ((addr, ws) for addr, ws in token_state.active_wallets.items()
+                 if addr not in rendered_addrs),
+                key=lambda x: x[1].last_seen,
+                reverse=True,
+            )
+            for wallet_addr, ws in filler_wallets:
+                if rendered_count >= _WALLET_DISPLAY_CAP:
+                    break
+                if len(lines) >= max_lines - 2:
+                    break
+
+                w_short = _short_addr(wallet_addr)
+                lines.append(f" {w_short}:")
+
+                if len(lines) >= max_lines - 1:
+                    break
+
+                age_str = ""
+                if ws.first_seen > 0:
+                    age = now - ws.first_seen
+                    age_str = f"   {age}s"
+                lines.append(age_str)
+                rendered_count += 1
+                rendered_addrs.add(wallet_addr)
 
         # Final line: remaining active wallets
-        remaining = active - rendered_count
+        remaining = max(0, active - rendered_count)
         if remaining > 0:
             lines.append(f" (+{remaining} more active wallets)")
 

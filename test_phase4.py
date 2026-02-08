@@ -109,8 +109,8 @@ def test_wallet_panel():
     assert any("Persist: 1" in l for l in lines)
     # Short wallet addresses displayed
     assert any("AAAA...AAAA" in l for l in lines)
-    # Summary line for remaining active wallets
-    assert any("more active wallets" in l for l in lines)
+    # With filler, all 3 wallets rendered (cap=4), so C appears as filler
+    assert any("CCCC...CCCC" in l for l in lines), "Filler wallet C should be rendered"
     print(f"  Rendered {len(lines)} lines: OK")
     for line in lines[:10]:
         if line.strip():
