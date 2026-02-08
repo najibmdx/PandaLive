@@ -261,6 +261,9 @@ def compute_silent_curves(
     candidates,
     exhaustion_ts,
 ):
+    eligible_wallets = {
+        wallet for wallet in early_wallets if len(activities.get(wallet, [])) > 0
+    }
     sample_times = list(range(start_ts, end_ts + 1, 30))
     if sample_times and sample_times[-1] != end_ts:
         sample_times.append(end_ts)
@@ -269,8 +272,11 @@ def compute_silent_curves(
         g_seconds = g_min * 60
         silent_curve = []
         for t in sample_times:
+            if not eligible_wallets:
+                silent_curve.append((t, 0))
+                continue
             silent_count = 0
-            for wallet in early_wallets:
+            for wallet in eligible_wallets:
                 times = activities.get(wallet, [])
                 last_ts = None
                 for ts in times:
@@ -282,9 +288,9 @@ def compute_silent_curves(
                     silent_count += 1
             silent_curve.append((t, silent_count))
         first_silent60_ts = None
-        if early_wallets:
+        if eligible_wallets:
             for t, silent_count in silent_curve:
-                if silent_count / float(len(early_wallets)) >= 0.6:
+                if silent_count / float(len(eligible_wallets)) >= 0.6:
                     first_silent60_ts = t
                     break
         lead_time = None
