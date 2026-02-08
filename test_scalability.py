@@ -76,7 +76,7 @@ def test_coordination_payload_cap():
 
 
 def test_wallet_panel_cap():
-    """WalletPanel never renders more than MAX_WALLET_LINES wallets."""
+    """WalletPanel never renders more than display cap wallets."""
     print("=== Wallet Panel Cap ===")
     panel = WalletPanel()
     ts = TokenState(ca=TOKEN, t0=1000)
@@ -94,15 +94,16 @@ def test_wallet_panel_cap():
 
     lines = panel.render(ts, signals, max_lines=50)
 
-    # Count wallet address lines (44-char addresses)
-    wallet_lines = [l for l in lines if any(addr("P", i) in l for i in range(30))]
-    assert len(wallet_lines) <= MAX_WALLET_LINES, (
-        f"Rendered {len(wallet_lines)} wallet lines, max is {MAX_WALLET_LINES}"
+    # Count wallet address lines (short addresses like P000...0000)
+    wallet_lines = [l for l in lines if "...0000:" in l]
+    display_cap = 4  # _WALLET_DISPLAY_CAP
+    assert len(wallet_lines) <= display_cap, (
+        f"Rendered {len(wallet_lines)} wallet lines, max is {display_cap}"
     )
 
-    # Should have summary for remaining
-    assert any("more wallets not shown" in l for l in lines), "Missing summary line"
-    print(f"  30 wallets -> {len(wallet_lines)} rendered (max {MAX_WALLET_LINES}): OK")
+    # Should have summary for remaining active wallets
+    assert any("more active wallets" in l for l in lines), "Missing summary line"
+    print(f"  30 wallets -> {len(wallet_lines)} rendered (max {display_cap}): OK")
     print(f"  Summary line present: OK")
 
 

@@ -72,7 +72,10 @@ def test_token_panel():
 
     assert any("PRESSURE_PEAKING" in l for l in lines)
     assert any("[S4]" in l for l in lines)
-    assert any("Episode: 1" in l for l in lines)
+    assert any("EP: 1" in l for l in lines)
+    assert any("Phase: Peaking" in l for l in lines)
+    assert any("Silent:" in l for l in lines)
+    assert any("Repl:" in l for l in lines)
     assert any("Recent Transitions" in l for l in lines)
     print(f"  Rendered {len(lines)} lines: OK")
     for line in lines[:8]:
@@ -101,12 +104,13 @@ def test_wallet_panel():
 
     lines = panel.render(ts, signals, max_lines=15)
 
-    assert any("Active:3" in l for l in lines)
-    assert any("Early:2" in l for l in lines)
-    assert any("Persist:1" in l for l in lines)
-    assert any("(Alpha)" in l for l in lines)
-    # Full 44-char address present
-    assert any(addr("A") in l for l in lines)
+    assert any("Active: 3" in l for l in lines)
+    assert any("Early: 2" in l for l in lines)
+    assert any("Persist: 1" in l for l in lines)
+    # Short wallet addresses displayed
+    assert any("AAAA...AAAA" in l for l in lines)
+    # Summary line for remaining active wallets
+    assert any("more active wallets" in l for l in lines)
     print(f"  Rendered {len(lines)} lines: OK")
     for line in lines[:10]:
         if line.strip():
@@ -157,8 +161,8 @@ def test_renderer_frame():
     frame = renderer.render_frame(ts, 1100)
     assert "PANDA LIVE" in frame
     assert "IGNITION" in frame
-    assert "TOKEN INTELLIGENCE" in frame
-    assert "WALLET SIGNALS" in frame
+    assert "TOKEN:" in frame
+    assert "Active:" in frame
     assert "EVENT STREAM" in frame
     print(f"  Frame rendered ({len(frame)} chars): OK")
     # Print first few lines
@@ -268,7 +272,7 @@ def test_live_processor_integration():
         # Verify we can render a frame
         frame = renderer.render_frame(ts, t0 + 100)
         assert "PANDA LIVE" in frame
-        assert "TOKEN INTELLIGENCE" in frame
+        assert "TOKEN:" in frame
         print(f"  Frame renders after processing: OK")
 
         # Check session log has events
@@ -331,10 +335,11 @@ def test_cli_display_rules():
     # REQUIRED: State + severity together
     assert "PRESSURE_PEAKING" in frame
     assert "[S4]" in frame
-    # REQUIRED: Full wallet addresses
-    assert addr("A") in frame
-    # REQUIRED: Wallet names
-    assert "(Alpha)" in frame
+    # REQUIRED: Short wallet addresses in wallet pane
+    assert "AAAA...AAAA" in frame
+    # REQUIRED: Silent and Replacement metrics
+    assert "Silent:" in frame
+    assert "Repl:" in frame
 
     # FORBIDDEN: Internal trigger names should NOT appear
     assert "5+_whales_2min_episode_max" not in frame
@@ -342,8 +347,8 @@ def test_cli_display_rules():
 
     print("  Compressed summaries with context: OK")
     print("  State + severity together: OK")
-    print("  Full wallet addresses shown: OK")
-    print("  Wallet names shown: OK")
+    print("  Short wallet addresses shown: OK")
+    print("  Silent + Replacement metrics shown: OK")
     print("  Internal triggers hidden: OK")
 
 

@@ -13,6 +13,22 @@ from ..models.events import StateTransitionEvent, WalletSignalEvent
 from ..models.token_state import TokenState
 from ..models.wallet_state import WalletState
 
+# State -> Phase mapping (deterministic, no logic invented)
+_STATE_TO_PHASE = {
+    "TOKEN_QUIET": "",
+    "TOKEN_IGNITION": "Early",
+    "TOKEN_COORDINATION_SPIKE": "Early",
+    "TOKEN_EARLY_PHASE": "Early",
+    "TOKEN_PERSISTENCE_CONFIRMED": "Building",
+    "TOKEN_PARTICIPATION_EXPANSION": "Expanding",
+    "TOKEN_PRESSURE_PEAKING": "Peaking",
+    "TOKEN_EXHAUSTION_DETECTED": "Dying",
+    "TOKEN_DISSIPATION": "Dying",
+}
+
+# Max wallets rendered in right pane
+_WALLET_DISPLAY_CAP = 4
+
 
 def _format_duration(seconds: int) -> str:
     """Format seconds into human-readable duration."""
@@ -61,42 +77,64 @@ class TokenPanel:
             List of formatted display strings.
         """
         lines: List[str] = []
-        lines.append(" TOKEN INTELLIGENCE")
-        lines.append("")
 
-        # State + severity
+        # Line 1: TOKEN: <mint_short> | EP: <id> | STATE: <STATE> [Sx]
+        mint_short = _short_addr(token_state.ca)
         state_name = token_state.current_state.replace("TOKEN_", "")
         severity = ""
         if recent_transitions:
             sev = recent_transitions[0].details.get("severity")
             if sev:
                 severity = f" [{sev}]"
-        lines.append(f" State: {state_name}{severity}")
+        lines.append(f" TOKEN: {mint_short} | EP: {token_state.episode_id} | STATE: {state_name}{severity}")
 
-        # Episode
-        lines.append(f" Episode: {token_state.episode_id}")
+        # Line 2: Phase
+        phase = _STATE_TO_PHASE.get(token_state.current_state, "")
+        lines.append(f" Phase: {phase}" if phase else " Phase:")
 
-        # Time in current state
-        if token_state.state_changed_at and current_time > token_state.state_changed_at:
-            dur = _format_duration(current_time - token_state.state_changed_at)
-            lines.append(f" Time in State: {dur}")
-
-        # Episode duration
-        if token_state.episode_start:
-            ep_dur = _format_duration(current_time - token_state.episode_start)
-            lines.append(f" Episode Duration: {ep_dur}")
-
+        # Line 3: blank
         lines.append("")
 
-        # Recent transitions
+        # Line 4: Capital: PRESENT | Active: X | Early: X (pct%) | Persist: X
+        active = len(token_state.active_wallets)
+        early = len(token_state.early_wallets)
+        persistent = sum(
+            1 for ws in token_state.active_wallets.values()
+            if len(ws.minute_buckets) >= 2
+        )
+        early_pct = f"({early * 100 // active}%)" if active > 0 else "(0%)"
+        lines.append(f" Capital: PRESENT | Active: {active} | Early: {early} {early_pct} | Persist: {persistent}")
+
+        # Line 5: Pressure: → | Silent: X/Y | Repl: YES|NO
+        silent_x, silent_y, _ = token_state.compute_silent(current_time)
+        replacement = token_state.compute_replacement(current_time)
+        lines.append(f" Pressure: \u2192 | Silent: {silent_x}/{silent_y} | Repl: {replacement}")
+
+        # Line 6: HB | Whale: Ns | Tx: Ns
+        whale_ago = ""
+        if token_state.last_whale_timestamp is not None:
+            whale_ago = f"{current_time - token_state.last_whale_timestamp}s"
+        else:
+            whale_ago = "-"
+        last_tx_ts = max(
+            (ws.last_seen for ws in token_state.active_wallets.values()),
+            default=0,
+        )
+        tx_ago = f"{current_time - last_tx_ts}s" if last_tx_ts > 0 else "-"
+        lines.append(f" HB | Whale: {whale_ago} | Tx: {tx_ago}")
+
+        # Line 7: blank
+        lines.append("")
+
+        # Line 8+: Recent Transitions
+        lines.append(" Recent Transitions:")
         if recent_transitions:
-            lines.append(" Recent Transitions:")
-            for t in recent_transitions[: max_lines - len(lines) - 1]:
+            for t in recent_transitions[: max_lines - len(lines)]:
                 ts_str = _format_time(t.timestamp)
                 to_short = t.to_state.replace("TOKEN_", "")
                 sev = t.details.get("severity", "")
                 sev_str = f" [{sev}]" if sev else ""
-                lines.append(f" {ts_str} -> {to_short}{sev_str}")
+                lines.append(f" {ts_str} \u2192 {to_short}{sev_str}")
 
         # Pad to max_lines
         while len(lines) < max_lines:
@@ -128,50 +166,54 @@ class WalletPanel:
             List of formatted display strings.
         """
         lines: List[str] = []
-        lines.append(" WALLET SIGNALS")
-        lines.append("")
+        now = int(time.time())
 
-        # Summary line with context
+        # Line 1: Active: X | Early: X (pct%) | Persist: X
         active = len(token_state.active_wallets)
         early = len(token_state.early_wallets)
         persistent = sum(
             1 for ws in token_state.active_wallets.values()
             if len(ws.minute_buckets) >= 2
         )
+        early_pct = f"({early * 100 // active}%)" if active > 0 else "(0%)"
+        lines.append(f" Active: {active} | Early: {early} {early_pct} | Persist: {persistent}")
 
-        early_pct = f"({early * 100 // active}%)" if active > 0 else ""
-        lines.append(f" Active:{active} | Early:{early}{early_pct} | Persist:{persistent}")
+        # Line 2: blank
         lines.append("")
 
-        # Wallet details with signals (capped to MAX_WALLET_LINES)
+        # Wallet details with signals (capped to _WALLET_DISPLAY_CAP)
         sorted_wallets = sorted(
             wallet_signals.items(), key=lambda x: len(x[1]), reverse=True
         )
         rendered_count = 0
-        total_with_signals = len([w for w in sorted_wallets if w[1]])
 
         for wallet_addr, signals in sorted_wallets:
-            if rendered_count >= MAX_WALLET_LINES:
+            if rendered_count >= _WALLET_DISPLAY_CAP:
                 break
             if len(lines) >= max_lines - 2:
                 break
             if not signals:
                 continue
 
-            name = self.wallet_names.get(wallet_addr, "")
-            name_str = f" ({name})" if name else ""
-            lines.append(f" {wallet_addr}{name_str}:")
+            w_short = _short_addr(wallet_addr)
+            lines.append(f" {w_short}:")
 
             if len(lines) >= max_lines - 1:
                 break
 
             flags = "".join(f"[{s[:5].upper()}]" for s in signals)
-            lines.append(f"   {flags}")
+            ws = token_state.active_wallets.get(wallet_addr)
+            age_str = ""
+            if ws and ws.first_seen > 0:
+                age = now - ws.first_seen
+                age_str = f"   {age}s"
+            lines.append(f"   {flags}{age_str}")
             rendered_count += 1
 
-        remaining = total_with_signals - rendered_count
+        # Final line: remaining active wallets
+        remaining = active - rendered_count
         if remaining > 0:
-            lines.append(f" (+{remaining} more wallets not shown)")
+            lines.append(f" (+{remaining} more active wallets)")
 
         # Pad to max_lines
         while len(lines) < max_lines:
