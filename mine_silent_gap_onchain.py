@@ -261,9 +261,13 @@ def compute_silent_curves(
     candidates,
     exhaustion_ts,
 ):
-    eligible_wallets = {
+    print("DEBUG: compute_silent_curves ENTERED")
+    eligible_wallets = [
         wallet for wallet in early_wallets if len(activities.get(wallet, [])) > 0
-    }
+    ]
+    print(
+        f"DEBUG: early_wallets={len(early_wallets)} eligible_wallets={len(eligible_wallets)}"
+    )
     sample_times = list(range(start_ts, end_ts + 1, 30))
     if sample_times and sample_times[-1] != end_ts:
         sample_times.append(end_ts)
@@ -271,10 +275,18 @@ def compute_silent_curves(
     for g_min in candidates:
         g_seconds = g_min * 60
         silent_curve = []
-        for t in sample_times:
-            if not eligible_wallets:
+        early_y = len(eligible_wallets)
+        if early_y == 0:
+            for t in sample_times:
                 silent_curve.append((t, 0))
-                continue
+            results[g_min] = {
+                "curve": silent_curve,
+                "first_silent60_ts": None,
+                "lead_time": None,
+                "silent60_hit": 0,
+            }
+            continue
+        for t in sample_times:
             silent_count = 0
             for wallet in eligible_wallets:
                 times = activities.get(wallet, [])
@@ -284,15 +296,16 @@ def compute_silent_curves(
                         last_ts = ts
                     else:
                         break
-                if last_ts is None or (t - last_ts) >= g_seconds:
+                if last_ts is None:
+                    continue
+                if (t - last_ts) >= g_seconds:
                     silent_count += 1
             silent_curve.append((t, silent_count))
         first_silent60_ts = None
-        if eligible_wallets:
-            for t, silent_count in silent_curve:
-                if silent_count / float(len(eligible_wallets)) >= 0.6:
-                    first_silent60_ts = t
-                    break
+        for t, silent_count in silent_curve:
+            if silent_count / float(early_y) >= 0.6:
+                first_silent60_ts = t
+                break
         lead_time = None
         silent60_hit = 0
         if first_silent60_ts is not None:
@@ -304,6 +317,7 @@ def compute_silent_curves(
             "first_silent60_ts": first_silent60_ts,
             "lead_time": lead_time,
             "silent60_hit": silent60_hit,
+            "early_y": early_y,
         }
     return results
 
@@ -409,7 +423,7 @@ def main():
             writer = csv.writer(handle)
             writer.writerow(["sample_ts", "silent_x", "early_y", "silent_pct"])
             for sample_ts, silent_count in data["curve"]:
-                early_y = len(early_wallets)
+                early_y = data.get("early_y", 0)
                 pct = (silent_count / float(early_y)) if early_y else 0.0
                 writer.writerow([sample_ts, silent_count, early_y, f"{pct:.4f}"])
 
