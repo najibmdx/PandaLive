@@ -166,7 +166,7 @@ class WalletPanel:
             List of formatted display strings.
         """
         lines: List[str] = []
-        now = int(time.time())
+        now = token_state.chain_now if token_state.chain_now is not None else int(time.time())
 
         # Line 1: Active: X | Early: X (pct%) | Persist: X
         active = len(token_state.active_wallets)
