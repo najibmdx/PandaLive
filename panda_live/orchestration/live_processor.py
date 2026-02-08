@@ -15,6 +15,7 @@ from typing import List, Optional
 
 from ..cli.renderer import CLIRenderer
 from ..config.thresholds import EARLY_WINDOW, MAX_ACTIVE_WALLETS
+from ..core.chain_time_clock import ChainTimeClock
 from ..core.signal_aggregator import SignalAggregator
 from ..core.time_windows import TimeWindowManager
 from ..core.token_state_machine import TokenStateMachine
@@ -36,12 +37,16 @@ class LiveProcessor:
         session_logger: SessionLogger,
         cli_renderer: CLIRenderer,
         refresh_rate: float = 5.0,
+        replay_mode: bool = False,
     ) -> None:
         self.token_ca = token_ca
         self.helius_client = helius_client
         self.session_logger = session_logger
         self.renderer = cli_renderer
         self.refresh_rate = refresh_rate
+
+        # Chain-aligned time clock
+        self.clock = ChainTimeClock(replay_mode=replay_mode)
 
         # Phase 1 components
         self.time_window_mgr = TimeWindowManager()
@@ -141,6 +146,9 @@ class LiveProcessor:
         """
         current_time = flow.timestamp
 
+        # Update chain time clock with on-chain timestamp
+        self.clock.observe(current_time)
+
         # Set token birth time (first observed swap)
         if self.token_state.t0 is None:
             self.token_state.t0 = current_time
@@ -211,8 +219,9 @@ class LiveProcessor:
         return False
 
     def _refresh_display(self) -> None:
-        """Render and display the current frame."""
-        current_time = int(time.time())
+        """Render and display the current frame using chain-aligned time."""
+        current_time = self.clock.now()
+        self.token_state.chain_now = current_time
         frame = self.renderer.render_frame(self.token_state, current_time)
         self.renderer.display(frame)
 

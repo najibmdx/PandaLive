@@ -31,6 +31,9 @@ class TokenState:
     last_whale_timestamp: Optional[int] = None
     prev_whale_timestamp: Optional[int] = None  # For reignition gap calculation
 
+    # Chain-aligned "now" (updated by LiveProcessor before render)
+    chain_now: Optional[int] = None
+
     # Density tracking: list of (timestamp, wallet_address) tuples
     whale_events_2min: List[Tuple[int, str]] = field(default_factory=list)
     episode_max_density: float = 0.0
