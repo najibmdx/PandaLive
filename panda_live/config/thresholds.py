@@ -35,6 +35,12 @@ PRESSURE_PEAKING_WINDOW: int = 120  # 2 minutes
 DISSIPATION_WHALE_THRESHOLD: int = 1  # <1 whale per lookback = dissipation
 DISSIPATION_LOOKBACK: int = 300  # 5 minutes
 
+# Silent metric (UI display, distinct from EXHAUSTION_SILENCE_THRESHOLD)
+SILENT_G_MIN_SECONDS: int = 540  # 9 minutes — mined from on-chain data
+
+# Replacement lookback (matches existing detect_exhaustion lookback)
+REPLACEMENT_LOOKBACK_SECONDS: int = 300  # 5 minutes — mined from on-chain data
+
 # Scalability Caps
 MAX_ACTIVE_WALLETS: int = 200
 MAX_WALLET_LINES: int = 10
