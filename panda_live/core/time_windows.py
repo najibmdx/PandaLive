@@ -36,10 +36,11 @@ class TimeWindowManager:
         bucket = ts // 60
         wallet_state.minute_buckets.add(bucket)
 
-        # Update seen timestamps
+        # Update seen timestamps and activity count
         if wallet_state.first_seen == 0:
             wallet_state.first_seen = ts
         wallet_state.last_seen = ts
+        wallet_state.activity_count += 1
 
     def expire_old_flows(self, wallet_state: WalletState, current_time: int) -> None:
         """Remove flows older than window boundaries and adjust cumulative sums.

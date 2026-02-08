@@ -34,5 +34,8 @@ class WalletState:
     whale_cum_5m_fired: bool = False
     whale_cum_15m_fired: bool = False
 
+    # Episode activity tracking (for silent eligibility)
+    activity_count: int = 0  # Incremented on each flow processed by pipeline
+
     # Signal detection state
     timing_checked: bool = False
