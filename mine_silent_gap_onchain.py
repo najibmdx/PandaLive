@@ -247,14 +247,8 @@ def build_activity_timeline(
     )
     in_range = []
     for item in signatures:
-        sig = item.get("signature")
-        if not sig:
-            continue
-        detail = get_transaction_detail(session, limiter, api_url, sig, cache_dir)
-        block_time = safe_int((detail.get("result") or {}).get("blockTime"))
-        if block_time is None:
-            continue
-        if start_ts <= block_time <= end_ts:
+        block_time = safe_int(item.get("blockTime"))
+        if block_time is not None and start_ts <= block_time <= end_ts:
             in_range.append(block_time)
     return sorted(in_range)
 
