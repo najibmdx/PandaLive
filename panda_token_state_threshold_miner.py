@@ -601,7 +601,7 @@ def mine_silence_thresholds(gaps: List[int]) -> Tuple[int, int, Dict[str, Any]]:
 
     death = max(2, death)
     if death <= ignition:
-        death = ignition + max(1, ignition // 5)
+        death = max(ignition + 1, 2 * ignition)
 
     rep = {
         "method": method,
@@ -1125,7 +1125,7 @@ def run_once(db: Path, outdir: Path, grid_seconds: int, source_mode: str, strict
 
         ign_thr, death_thr, silence_report = mine_silence_thresholds(gaps)
         if death_thr <= ign_thr:
-            death_thr = ign_thr + max(1, ign_thr // 5)
+            death_thr = max(ign_thr + 1, 2 * ign_thr)
 
         grid = build_grid_tape(event_tape, grid_seconds)
         coord_params, coord_feats, coord_report = mine_coordination(grid, gaps, death_thr)
@@ -1156,7 +1156,8 @@ def run_once(db: Path, outdir: Path, grid_seconds: int, source_mode: str, strict
             if eligible:
                 thresholds["IGNITION_SILENCE_THRESHOLD"] = max(1, int(quantile(eligible, 0.70, 1.0)))
                 if thresholds["DEATH_SILENCE_THRESHOLD"] <= thresholds["IGNITION_SILENCE_THRESHOLD"]:
-                    thresholds["DEATH_SILENCE_THRESHOLD"] = thresholds["IGNITION_SILENCE_THRESHOLD"] + 1
+                    iw = int(thresholds["IGNITION_SILENCE_THRESHOLD"])
+                    thresholds["DEATH_SILENCE_THRESHOLD"] = max(iw + 1, 2 * iw)
                 states, final = assign_states(grid, thresholds, feats)
 
         thresholds["metadata"] = {
