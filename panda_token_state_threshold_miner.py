@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic threshold miner for Panda token states using local SQLite only."""
+"""Deterministic threshold miner for Panda token states using local SQLite only.
+
+State truth evaluation is performed on a regular per-mint time grid (default 60s bars).
+"""
 
 from __future__ import annotations
 
@@ -67,9 +70,9 @@ def safe_int(v: Any) -> Optional[int]:
 def quantile(vals: Sequence[float], q: float, default: float = 0.0) -> float:
     if not vals:
         return default
-    if len(vals) == 1:
-        return float(vals[0])
     xs = sorted(float(v) for v in vals)
+    if len(xs) == 1:
+        return xs[0]
     q = max(0.0, min(1.0, q))
     pos = (len(xs) - 1) * q
     lo = int(math.floor(pos))
@@ -98,9 +101,24 @@ class Event:
 class EventTape:
     events: List[Event]
 
+
+@dataclass
+class GridTape:
+    mint: List[str]
+    t: List[int]
+    event_occurs: List[bool]
+    event_count_bar: List[int]
+    buy_count_bar: List[int]
+    sell_count_bar: List[int]
+    lamports_buy_bar: List[int]
+    lamports_sell_bar: List[int]
+    time_since_last_event: List[int]
+    gap_to_prev_event_for_bar_event: List[int]
+    mint_ranges: Dict[str, Tuple[int, int]]  # [start, end)
+
     @property
     def n(self) -> int:
-        return len(self.events)
+        return len(self.t)
 
 
 def discover_schema(conn: sqlite3.Connection) -> Dict[str, List[str]]:
@@ -127,7 +145,7 @@ def pick_col(cols: Sequence[str], names: Sequence[str]) -> Optional[str]:
 
 
 def fetch_rows(conn: sqlite3.Connection, table: str, cols: Sequence[str]) -> Iterable[sqlite3.Row]:
-    sel = ', '.join(['"{}"'.format(c) for c in cols])
+    sel = ", ".join(['"{}"'.format(c) for c in cols])
     sql = f"SELECT {sel} FROM \"{table}\""
     cur = conn.execute(sql)
     while True:
@@ -166,8 +184,7 @@ def build_tape_from_whale_events(conn: sqlite3.Connection, cols: List[str]) -> T
     idx = {c: i for i, c in enumerate(use_cols)}
 
     events: List[Event] = []
-    total = 0
-    bad_mint = bad_time = bad_wallet = bad_type = 0
+    total = bad_mint = bad_time = bad_wallet = 0
     for r in fetch_rows(conn, "whale_events", use_cols):
         total += 1
         mint = "" if r[idx[mint_c]] is None else str(r[idx[mint_c]]).strip()
@@ -182,12 +199,9 @@ def build_tape_from_whale_events(conn: sqlite3.Connection, cols: List[str]) -> T
         if not wallet:
             bad_wallet += 1
             continue
-        if not isinstance(t, int):
-            bad_type += 1
-            continue
         side = "unknown"
-        if side_c:
-            side = "unknown" if r[idx[side_c]] is None else str(r[idx[side_c]]).lower().strip()
+        if side_c and r[idx[side_c]] is not None:
+            side = str(r[idx[side_c]]).lower().strip()
         lam = 0
         if lam_c:
             lv = safe_int(r[idx[lam_c]])
@@ -203,7 +217,6 @@ def build_tape_from_whale_events(conn: sqlite3.Connection, cols: List[str]) -> T
         "rows_bad_mint": bad_mint,
         "rows_bad_time": bad_time,
         "rows_bad_wallet": bad_wallet,
-        "rows_bad_type": bad_type,
     }
     if total == 0:
         report["reasons"].append("whale_events has zero rows")
@@ -225,6 +238,7 @@ def build_tape_from_swaps(conn: sqlite3.Connection, schema: Dict[str, List[str]]
             break
     if not table:
         raise RuntimeError("No swaps-like table found for fallback.")
+
     cols = schema[table]
     mint_c = pick_col(cols, ["mint", "token_mint", "token"])
     t_c = pick_col(cols, ["t", "time", "timestamp", "ts", "block_time"])
@@ -237,56 +251,156 @@ def build_tape_from_swaps(conn: sqlite3.Connection, schema: Dict[str, List[str]]
     use_cols = [mint_c, t_c, wallet_c, lam_c] + ([side_c] if side_c else [])
     idx = {c: i for i, c in enumerate(use_cols)}
     raw: List[Tuple[str, int, str, str, int]] = []
-    sizes: List[int] = []
+    lamports: List[int] = []
     for r in fetch_rows(conn, table, use_cols):
         mint = "" if r[idx[mint_c]] is None else str(r[idx[mint_c]]).strip()
         t = safe_int(r[idx[t_c]])
         wallet = "" if r[idx[wallet_c]] is None else str(r[idx[wallet_c]]).strip()
-        lam = safe_int(r[idx[lam_c]])
-        if not mint or t is None or not wallet or lam is None:
+        lv = safe_int(r[idx[lam_c]])
+        if not mint or t is None or not wallet or lv is None:
             continue
-        lam = abs(int(lam))
-        side = "unknown" if not side_c or r[idx[side_c]] is None else str(r[idx[side_c]]).lower().strip()
+        lam = abs(int(lv))
+        side = "unknown"
+        if side_c and r[idx[side_c]] is not None:
+            side = str(r[idx[side_c]]).lower().strip()
         raw.append((mint, int(t), wallet, side, lam))
-        sizes.append(lam)
+        lamports.append(lam)
     if not raw:
         raise RuntimeError("Fallback swaps table has no usable rows.")
-    whale_thr = int(quantile(sizes, 0.99, default=1.0))
-    whale_thr = max(1, whale_thr)
+
+    whale_thr = max(1, int(quantile(lamports, 0.99, 1.0)))
     events = [Event(m, t, w, s, lam, "derived_whale_from_swaps") for (m, t, w, s, lam) in raw if lam >= whale_thr]
     if not events:
         raise RuntimeError("Fallback swaps-derived whale threshold produced zero events.")
     events.sort(key=lambda e: (e.mint, e.t, e.wallet, e.event_type))
-    report = {
+    rep = {
         "source": f"{table} (fallback)",
         "fallback_reason": "whale_events truly missing; derived whale threshold from swaps lamports P99",
         "derived_whale_lamports_threshold": whale_thr,
     }
-    return EventTape(events), report
+    return EventTape(events), rep
 
 
-def build_event_tape(conn: sqlite3.Connection, schema: Dict[str, List[str]], strict: bool, outdir: Path) -> Tuple[EventTape, Dict[str, Any]]:
+def build_event_tape(conn: sqlite3.Connection, schema: Dict[str, List[str]], outdir: Path) -> Tuple[EventTape, Dict[str, Any]]:
     if "whale_events" in schema:
-        tape, report = build_tape_from_whale_events(conn, schema["whale_events"])
+        tape, rep = build_tape_from_whale_events(conn, schema["whale_events"])
         if tape is not None:
-            return tape, {"source": "whale_events", "whale_events_report": report}
-        # whale_events exists -> do NOT fallback unless table truly missing
+            return tape, {"source": "whale_events", "whale_events_report": rep}
         outdir.mkdir(parents=True, exist_ok=True)
-        (outdir / "whale_events_unusable_report.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        raise RuntimeError("whale_events table exists but is unusable; see whale_events_unusable_report.json.")
-
-    tape, r = build_tape_from_swaps(conn, schema)
-    return tape, {"source": r["source"], "fallback_report": r}
-
-
-def indices_by_mint(tape: EventTape) -> Dict[str, List[int]]:
-    out: Dict[str, List[int]] = defaultdict(list)
-    for i, e in enumerate(tape.events):
-        out[e.mint].append(i)
-    return out
+        (outdir / "whale_events_unusable_report.json").write_text(json.dumps(rep, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        raise RuntimeError("whale_events table exists but is unusable; see whale_events_unusable_report.json")
+    tape, rep = build_tape_from_swaps(conn, schema)
+    return tape, {"source": rep["source"], "fallback_report": rep}
 
 
-def kmeans_1d_two_clusters(values: Sequence[float]) -> Tuple[float, float, List[int]]:
+def split_by_mint(events: List[Event]) -> Dict[str, List[Event]]:
+    out: Dict[str, List[Event]] = defaultdict(list)
+    for e in events:
+        out[e.mint].append(e)
+    for m in out:
+        out[m].sort(key=lambda x: (x.t, x.wallet, x.event_type))
+    return dict(out)
+
+
+def build_grid_tape(tape: EventTape, grid_seconds: int) -> GridTape:
+    by_mint = split_by_mint(tape.events)
+
+    gm: List[str] = []
+    gt: List[int] = []
+    event_occurs: List[bool] = []
+    event_count_bar: List[int] = []
+    buy_count_bar: List[int] = []
+    sell_count_bar: List[int] = []
+    lam_buy_bar: List[int] = []
+    lam_sell_bar: List[int] = []
+    time_since_last: List[int] = []
+    gap_to_prev_for_event_bar: List[int] = []
+    mint_ranges: Dict[str, Tuple[int, int]] = {}
+
+    for mint in sorted(by_mint):
+        evs = by_mint[mint]
+        tmin = evs[0].t
+        tmax = evs[-1].t
+        gstart = (tmin // grid_seconds) * grid_seconds
+        gend = ((tmax + grid_seconds - 1) // grid_seconds) * grid_seconds
+        times = list(range(gstart, gend + 1, grid_seconds))
+
+        start_ix = len(gt)
+        ei = 0
+        last_event_t: Optional[int] = None
+        prev_event_t: Optional[int] = None
+
+        for T in times:
+            bar_start = T - grid_seconds
+            bar_events: List[Event] = []
+            while ei < len(evs) and evs[ei].t <= T:
+                if evs[ei].t > bar_start:
+                    bar_events.append(evs[ei])
+                ei += 1
+
+            occurs = len(bar_events) > 0
+            b = sum(1 for e in bar_events if e.side == "buy")
+            s = sum(1 for e in bar_events if e.side == "sell")
+            lb = sum(int(e.sol_lamports) for e in bar_events if e.side == "buy")
+            ls = sum(int(e.sol_lamports) for e in bar_events if e.side == "sell")
+
+            if occurs:
+                first_ev_t = min(e.t for e in bar_events)
+                # previous event strictly before first event in this bar
+                # deterministic: scan back from all processed events in this bar
+                prev_before_bar = prev_event_t
+                if prev_before_bar is None:
+                    gap_ev = 10**9
+                else:
+                    gap_ev = max(0, first_ev_t - prev_before_bar)
+                gap_to_prev_for_event_bar.append(gap_ev)
+                prev_event_t = max(e.t for e in bar_events)
+                last_event_t = prev_event_t
+            else:
+                gap_to_prev_for_event_bar.append(0)
+
+            tsle = 10**9 if last_event_t is None else max(0, T - last_event_t)
+
+            gm.append(mint)
+            gt.append(T)
+            event_occurs.append(occurs)
+            event_count_bar.append(len(bar_events))
+            buy_count_bar.append(b)
+            sell_count_bar.append(s)
+            lam_buy_bar.append(lb)
+            lam_sell_bar.append(ls)
+            time_since_last.append(tsle)
+
+        mint_ranges[mint] = (start_ix, len(gt))
+
+    return GridTape(
+        mint=gm,
+        t=gt,
+        event_occurs=event_occurs,
+        event_count_bar=event_count_bar,
+        buy_count_bar=buy_count_bar,
+        sell_count_bar=sell_count_bar,
+        lamports_buy_bar=lam_buy_bar,
+        lamports_sell_bar=lam_sell_bar,
+        time_since_last_event=time_since_last,
+        gap_to_prev_event_for_bar_event=gap_to_prev_for_event_bar,
+        mint_ranges=mint_ranges,
+    )
+
+
+def collect_event_gaps(events: List[Event]) -> List[int]:
+    by_mint = split_by_mint(events)
+    gaps: List[int] = []
+    for mint in sorted(by_mint):
+        evs = by_mint[mint]
+        for i in range(1, len(evs)):
+            g = evs[i].t - evs[i - 1].t
+            if g > 0:
+                gaps.append(g)
+    return gaps
+
+
+def kmeans_1d_two(values: Sequence[float]) -> Tuple[float, float, List[int]]:
     c1 = quantile(values, 0.25)
     c2 = quantile(values, 0.75)
     if c1 == c2:
@@ -295,220 +409,215 @@ def kmeans_1d_two_clusters(values: Sequence[float]) -> Tuple[float, float, List[
     for _ in range(50):
         changed = False
         for i, v in enumerate(values):
-            d1 = abs(v - c1)
-            d2 = abs(v - c2)
-            lb = 0 if d1 <= d2 else 1
-            if lb != labels[i]:
-                labels[i] = lb
+            l = 0 if abs(v - c1) <= abs(v - c2) else 1
+            if labels[i] != l:
+                labels[i] = l
                 changed = True
         g1 = [v for v, l in zip(values, labels) if l == 0]
         g2 = [v for v, l in zip(values, labels) if l == 1]
         if not g1 or not g2:
             break
-        nc1 = sum(g1) / len(g1)
-        nc2 = sum(g2) / len(g2)
-        if abs(nc1 - c1) < 1e-10 and abs(nc2 - c2) < 1e-10 and not changed:
+        n1 = sum(g1) / len(g1)
+        n2 = sum(g2) / len(g2)
+        if not changed and abs(n1 - c1) < 1e-10 and abs(n2 - c2) < 1e-10:
             break
-        c1, c2 = nc1, nc2
+        c1, c2 = n1, n2
     if c1 <= c2:
         return c1, c2, labels
     return c2, c1, [1 - l for l in labels]
 
 
-def mode_log_hist(values: Sequence[float], bins: int = 200) -> float:
-    lo, hi = min(values), max(values)
+def mode_hist(vals: Sequence[float], bins: int = 200) -> float:
+    lo, hi = min(vals), max(vals)
     if hi <= lo + 1e-12:
         return lo
     step = (hi - lo) / bins
-    counts = [0] * bins
-    for v in values:
+    hist = [0] * bins
+    for v in vals:
         i = int((v - lo) / step)
-        if i >= bins:
-            i = bins - 1
-        if i < 0:
-            i = 0
-        counts[i] += 1
-    best_i = max(range(bins), key=lambda i: (counts[i], -i))
-    return lo + (best_i + 0.5) * step
+        i = max(0, min(bins - 1, i))
+        hist[i] += 1
+    best = max(range(bins), key=lambda i: (hist[i], -i))
+    return lo + (best + 0.5) * step
 
 
-def valley_between_modes(values: Sequence[float], left: float, right: float, bins: int = 400) -> float:
-    lo, hi = min(values), max(values)
+def valley_hist(vals: Sequence[float], left: float, right: float, bins: int = 400) -> float:
+    lo, hi = min(vals), max(vals)
     if hi <= lo + 1e-12:
         return lo
     step = (hi - lo) / bins
-    counts = [0] * bins
-    for v in values:
+    hist = [0] * bins
+    for v in vals:
         i = int((v - lo) / step)
-        if i >= bins:
-            i = bins - 1
-        if i < 0:
-            i = 0
-        counts[i] += 1
+        i = max(0, min(bins - 1, i))
+        hist[i] += 1
     li = max(0, min(bins - 1, int((left - lo) / step)))
     ri = max(0, min(bins - 1, int((right - lo) / step)))
     if li > ri:
         li, ri = ri, li
-    if li == ri:
-        return lo + (li + 0.5) * step
-    best = li
-    best_count = counts[li]
-    for i in range(li, ri + 1):
-        if counts[i] < best_count:
-            best_count = counts[i]
-            best = i
+    best = min(range(li, ri + 1), key=lambda i: (hist[i], i))
     return lo + (best + 0.5) * step
 
 
-def mine_silence_thresholds(tape: EventTape, by_mint: Dict[str, List[int]]) -> Tuple[int, int, Dict[str, Any]]:
-    gaps: List[int] = []
-    for idx in by_mint.values():
-        for j in range(1, len(idx)):
-            g = tape.events[idx[j]].t - tape.events[idx[j - 1]].t
-            if g > 0:
-                gaps.append(g)
+def mine_silence_thresholds(gaps: List[int]) -> Tuple[int, int, Dict[str, Any]]:
     if not gaps:
-        raise RuntimeError("Insufficient consecutive whale events to mine silence thresholds.")
+        raise RuntimeError("No positive inter-event gaps available for silence mining")
+    lg = [math.log(g) for g in gaps]
+    m1, m2, labels = kmeans_1d_two(lg)
+    spread = quantile(lg, 0.95) - quantile(lg, 0.05)
+    sep = m2 - m1
 
-    lgaps = [math.log(g) for g in gaps]
-    active_mean, inactive_mean, labels = kmeans_1d_two_clusters(lgaps)
-    spread = (quantile(lgaps, 0.95) - quantile(lgaps, 0.05))
-    separation = inactive_mean - active_mean
-
-    if separation > max(0.15, 0.15 * spread):
-        valley = valley_between_modes(lgaps, active_mean, inactive_mean)
-        ignition = int(round(math.exp(valley)))
-        inactive_cluster = [math.exp(v) for v, l in zip(lgaps, labels) if l == 1]
-        if inactive_cluster:
-            death = int(round(quantile(inactive_cluster, 0.35)))
+    if sep > max(0.15, 0.15 * spread):
+        valley = valley_hist(lg, m1, m2)
+        ignition = max(1, int(round(math.exp(valley))))
+        inactive = [math.exp(v) for v, l in zip(lg, labels) if l == 1]
+        if inactive:
+            death = int(round(quantile(inactive, 0.35)))
         else:
-            death = int(round(math.exp((valley + inactive_mean) / 2.0)))
-        method = "kmeans2_log_gap_valley_plus_inactive_anchor"
+            death = int(round(math.exp((valley + m2) / 2.0)))
+        method = "kmeans2_log_gap_valley_for_ignition_and_inactive_anchor_for_death"
     else:
-        p90 = quantile(gaps, 0.90)
-        active = [math.log(g) for g in gaps if g <= p90] or lgaps
-        inactive = [math.log(g) for g in gaps if g > p90] or lgaps
-        active_mode = mode_log_hist(active)
-        inactive_mode = mode_log_hist(inactive)
-        ignition = int(round(math.exp(active_mode)))
-        death = int(round(math.exp((active_mode + inactive_mode) / 2.0)))
+        p90 = quantile(gaps, 0.9)
+        active = [math.log(g) for g in gaps if g <= p90] or lg
+        inactive = [math.log(g) for g in gaps if g > p90] or lg
+        am = mode_hist(active)
+        im = mode_hist(inactive)
+        ignition = max(1, int(round(math.exp(am))))
+        death = int(round(math.exp((am + im) / 2.0)))
         method = "hist_mode_active_inactive_fallback"
 
-    ignition = max(1, ignition)
     death = max(2, death)
     if death <= ignition:
         death = ignition + max(1, ignition // 5)
 
-    return ignition, death, {
+    rep = {
         "method": method,
         "gap_count": len(gaps),
-        "active_mean_log": active_mean,
-        "inactive_mean_log": inactive_mean,
-        "separation": separation,
+        "active_mean_log": m1,
+        "inactive_mean_log": m2,
+        "separation": sep,
         "IGNITION_SILENCE_THRESHOLD": ignition,
         "DEATH_SILENCE_THRESHOLD": death,
     }
+    return ignition, death, rep
 
 
-def rolling_window_counts(times: List[int], wallets: List[str], window_s: int) -> Tuple[List[int], List[float], List[float], List[int]]:
-    n = len(times)
-    uniq = [0] * n
-    mean_inter = [float(window_s)] * n
-    rate = [0.0] * n
-    prev_count = [0] * n
+def rolling_sum(arr: List[int], times: List[int], W: int) -> List[int]:
+    out = [0] * len(arr)
     left = 0
-    wallet_count: Dict[str, int] = defaultdict(int)
-    for i in range(n):
-        t = times[i]
-        while left <= i and times[left] < t - window_s:
-            w = wallets[left]
-            wallet_count[w] -= 1
-            if wallet_count[w] <= 0:
-                del wallet_count[w]
+    s = 0
+    for i, t in enumerate(times):
+        while left <= i and times[left] <= t - W:
+            s -= arr[left]
             left += 1
-        # count before adding current
-        prev_count[i] = i - left
-        wallet_count[wallets[i]] += 1
-        size = i - left + 1
-        uniq[i] = len(wallet_count)
-        span = max(1, t - times[left])
-        rate[i] = size / span
-        if size >= 2:
-            diffs = [times[k] - times[k - 1] for k in range(left + 1, i + 1)]
-            mean_inter[i] = sum(diffs) / len(diffs)
-    return uniq, mean_inter, rate, prev_count
+        s += arr[i]
+        out[i] = s
+    return out
 
 
-def mine_coordination(tape: EventTape, by_mint: Dict[str, List[int]], gaps: List[int]) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
-    base_windows = [int(quantile(gaps, q, default=60.0)) for q in (0.10, 0.25, 0.50, 0.75)]
-    c_windows = unique_sorted_ints(max(10, min(600, w)) for w in base_windows if w > 0)
+def rolling_observables(grid: GridTape, W: int) -> Dict[str, List[float]]:
+    uniq = [0] * grid.n
+    mean_inter = [float(W)] * grid.n
+    rate = [0.0] * grid.n
+
+    # derive wallet-level info from bar data approximation using event_count only
+    # unique proxy is cumulative distinct-event bars in window; deterministic, data-only
+    for mint in sorted(grid.mint_ranges):
+        s, e = grid.mint_ranges[mint]
+        times = grid.t[s:e]
+        cnt = grid.event_count_bar[s:e]
+        left = 0
+        window_events = 0
+        event_times: List[int] = []
+        for i in range(len(times)):
+            t = times[i]
+            while left <= i and times[left] <= t - W:
+                window_events -= cnt[left]
+                left += 1
+                # trim event_times by time
+                event_times = [x for x in event_times if x > t - W]
+            window_events += cnt[i]
+            if cnt[i] > 0:
+                event_times.extend([t] * cnt[i])
+            # proxy unique whales from event density in window
+            uniq[s + i] = max(0, int(round(math.sqrt(max(0, window_events)))))
+            span = max(1, t - times[left])
+            rate[s + i] = window_events / span
+            if len(event_times) >= 2:
+                dif = [event_times[k] - event_times[k - 1] for k in range(1, len(event_times))]
+                mean_inter[s + i] = sum(dif) / len(dif)
+            elif window_events > 0:
+                mean_inter[s + i] = float(W)
+    return {"unique": uniq, "mean_inter": mean_inter, "rate": rate}
+
+
+def transitions_per_hour(mask: List[bool], grid: GridTape) -> float:
+    trans = 0
+    hours = 0.0
+    for mint in sorted(grid.mint_ranges):
+        s, e = grid.mint_ranges[mint]
+        m = mask[s:e]
+        for i in range(1, len(m)):
+            if m[i] != m[i - 1]:
+                trans += 1
+        if e - s >= 2:
+            hours += max(1, grid.t[e - 1] - grid.t[s]) / 3600.0
+    return trans / hours if hours > 0 else float("inf")
+
+
+def mine_coordination(grid: GridTape, gaps: List[int], death_thr: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
+    c_windows = unique_sorted_ints(max(10, min(600, int(quantile(gaps, q, 60.0)))) for q in (0.10, 0.25, 0.50, 0.75))
     if not c_windows:
         c_windows = [60]
 
     candidates = []
-    all_activation = []
-    cache: Dict[int, Tuple[List[int], List[float]]] = {}
+    act_rates = []
+    cache: Dict[int, Dict[str, List[float]]] = {}
+    for W in c_windows:
+        obs = rolling_observables(grid, W)
+        cache[W] = obs
+        uniq = obs["unique"]
+        mean_inter = obs["mean_inter"]
+        uthr_c = unique_sorted_ints(max(1, int(quantile(uniq, q))) for q in (0.60, 0.70, 0.80, 0.90))
+        ithr_c = unique_sorted_ints(max(1, int(quantile(mean_inter, q))) for q in (0.10, 0.25, 0.40, 0.50))
+        for uthr in uthr_c:
+            for ithr in ithr_c:
+                mask = [uniq[i] >= uthr and mean_inter[i] <= ithr for i in range(grid.n)]
+                act = sum(mask) / max(1, grid.n)
+                act_rates.append(act)
+                collisions = sum(1 for i in range(grid.n) if mask[i] and grid.time_since_last_event[i] >= death_thr) / max(1, grid.n)
+                flick = transitions_per_hour(mask, grid)
+                candidates.append({"W": W, "uthr": uthr, "ithr": ithr, "activation": act, "collisions": collisions, "flicker": flick})
 
-    for w in c_windows:
-        uniq_all = [0] * tape.n
-        inter_all = [float(w)] * tape.n
-        for idx in by_mint.values():
-            tt = [tape.events[i].t for i in idx]
-            ww = [tape.events[i].wallet for i in idx]
-            u, mi, _, _ = rolling_window_counts(tt, ww, w)
-            for local_i, global_i in enumerate(idx):
-                uniq_all[global_i] = u[local_i]
-                inter_all[global_i] = mi[local_i]
-        cache[w] = (uniq_all, inter_all)
-        uniq_thr = unique_sorted_ints(int(quantile(uniq_all, q)) for q in (0.60, 0.70, 0.80, 0.90) if quantile(uniq_all, q) >= 2)
-        inter_thr = unique_sorted_ints(max(1, int(quantile(inter_all, q))) for q in (0.10, 0.25, 0.40, 0.50))
-        if not uniq_thr:
-            uniq_thr = [2]
-        if not inter_thr:
-            inter_thr = [max(1, w // 2)]
-        for uthr in uniq_thr:
-            for ithr in inter_thr:
-                mask = [(u >= uthr and m <= ithr) for u, m in zip(uniq_all, inter_all)]
-                act = sum(mask) / max(1, len(mask))
-                all_activation.append(act)
-                trans = 0
-                hours = 0.0
-                for idx in by_mint.values():
-                    m = [mask[i] for i in idx]
-                    trans += sum(1 for i in range(1, len(m)) if m[i] != m[i - 1])
-                    if len(idx) >= 2:
-                        hours += max(1, tape.events[idx[-1]].t - tape.events[idx[0]].t) / 3600.0
-                flick = trans / hours if hours > 0 else float("inf")
-                candidates.append({"W": w, "uthr": uthr, "ithr": ithr, "activation": act, "flicker": flick})
+    lo = quantile(act_rates, 0.05, 0.0)
+    hi = quantile(act_rates, 0.20, 1.0)
+    best = min(
+        candidates,
+        key=lambda c: (
+            0 if lo <= c["activation"] <= hi else 1,
+            c["collisions"],
+            c["flicker"],
+            abs(c["activation"] - ((lo + hi) / 2.0)),
+            c["W"],
+            c["uthr"],
+            c["ithr"],
+        ),
+    )
 
-    lo = quantile(all_activation, 0.05, 0.0)
-    hi = quantile(all_activation, 0.20, 1.0)
-
-    best = None
-    best_key = None
-    for c in candidates:
-        penalty = 0 if lo <= c["activation"] <= hi else 1
-        key = (penalty, c["flicker"], abs(c["activation"] - ((lo + hi) / 2.0)), c["W"], c["uthr"], c["ithr"])
-        if best_key is None or key < best_key:
-            best_key = key
-            best = c
-
-    assert best is not None
-    uniq_all, inter_all = cache[best["W"]]
-    coord_mask = [(u >= best["uthr"] and m <= best["ithr"]) for u, m in zip(uniq_all, inter_all)]
-
+    obs = cache[int(best["W"])]
+    coord_mask = [obs["unique"][i] >= int(best["uthr"]) and obs["mean_inter"][i] <= int(best["ithr"]) for i in range(grid.n)]
     return (
         {
             "COORD_WINDOW_SECONDS": int(best["W"]),
             "COORD_UNIQUE_WHALES_THRESHOLD": int(best["uthr"]),
             "COORD_INTERARRIVAL_THRESHOLD": int(best["ithr"]),
         },
-        {"coord_unique": uniq_all, "coord_inter": inter_all, "coord_mask": coord_mask},
+        {"coord_unique": [int(x) for x in obs["unique"]], "coord_inter": obs["mean_inter"], "coord_mask": coord_mask},
         {"candidate_windows": c_windows, "activation_band": [lo, hi], "selected": best, "num_candidates": len(candidates)},
     )
 
 
-def mine_acceleration(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: int, coord_mask: List[bool]) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
+def mine_acceleration(grid: GridTape, coord_w: int, coord_mask: List[bool]) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
     short_c = unique_sorted_ints(max(5, min(coord_w, x)) for x in [coord_w // 4, coord_w // 3, coord_w // 2, int(math.sqrt(max(1, coord_w)) * 2)])
     long_c = unique_sorted_ints(max(coord_w + 1, x) for x in [coord_w, int(coord_w * 1.5), coord_w * 2, coord_w * 3])
     long_c = [x for x in long_c if x > min(short_c)] or [max(coord_w + 1, min(short_c) + 1)]
@@ -516,62 +625,48 @@ def mine_acceleration(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: i
     best = None
     best_key = None
     best_feats = None
-    cand = 0
+    cand_count = 0
 
     for ws in short_c:
+        obs_s = rolling_observables(grid, ws)
         for wl in long_c:
             if wl <= ws:
                 continue
-            rate_s = [0.0] * tape.n
-            rate_l = [0.0] * tape.n
-            for idx in by_mint.values():
-                tt = [tape.events[i].t for i in idx]
-                ww = [tape.events[i].wallet for i in idx]
-                _, _, rs, _ = rolling_window_counts(tt, ww, ws)
-                _, _, rl, _ = rolling_window_counts(tt, ww, wl)
-                for k, gi in enumerate(idx):
-                    rate_s[gi] = rs[k]
-                    rate_l[gi] = rl[k]
-            ratio = [rate_s[i] / max(1e-12, rate_l[i]) for i in range(tape.n)]
-            thr_c = sorted({quantile(ratio, q) for q in (0.70, 0.80, 0.90, 0.95) if quantile(ratio, q) > 1.0}) or [1.2]
-            early_proxy_thr = quantile(rate_l, 0.75)
+            obs_l = rolling_observables(grid, wl)
+            rs = obs_s["rate"]
+            rl = obs_l["rate"]
+            ratio = [rs[i] / max(1e-12, rl[i]) for i in range(grid.n)]
+            thr_c = sorted({quantile(ratio, q, 1.2) for q in (0.70, 0.80, 0.90, 0.95) if quantile(ratio, q, 1.2) > 1.0}) or [1.2]
+            early_proxy_thr = quantile(rl, 0.75, 0.0)
             for rthr in thr_c:
-                cand += 1
-                mask = [r >= rthr for r in ratio]
-                overlap_coord = sum(1 for i in range(tape.n) if mask[i] and coord_mask[i]) / max(1, tape.n)
-                overlap_early = sum(1 for i in range(tape.n) if mask[i] and rate_l[i] >= early_proxy_thr) / max(1, tape.n)
-                trans = 0
-                hours = 0.0
-                for idx in by_mint.values():
-                    m = [mask[i] for i in idx]
-                    trans += sum(1 for i in range(1, len(m)) if m[i] != m[i - 1])
-                    if len(idx) >= 2:
-                        hours += max(1, tape.events[idx[-1]].t - tape.events[idx[0]].t) / 3600.0
-                flick = trans / hours if hours > 0 else float("inf")
-                act = sum(mask) / max(1, tape.n)
+                cand_count += 1
+                mask = [ratio[i] >= rthr for i in range(grid.n)]
+                overlap_coord = sum(1 for i in range(grid.n) if mask[i] and coord_mask[i]) / max(1, grid.n)
+                overlap_early = sum(1 for i in range(grid.n) if mask[i] and rl[i] >= early_proxy_thr) / max(1, grid.n)
+                flick = transitions_per_hour(mask, grid)
+                act = sum(mask) / max(1, grid.n)
                 key = (overlap_coord + overlap_early, flick, abs(act - 0.10), ws, wl, rthr)
                 if best_key is None or key < best_key:
                     best_key = key
-                    best = {"ws": ws, "wl": wl, "rthr": float(rthr), "activation": act, "flicker": flick, "overlap_coord": overlap_coord, "overlap_early": overlap_early}
-                    best_feats = (rate_s, rate_l, ratio, mask)
+                    best = {"ws": ws, "wl": wl, "rthr": float(rthr), "activation": act, "flicker": flick}
+                    best_feats = (rs, rl, ratio, mask)
 
-    assert best and best_feats
-    rate_s, rate_l, ratio, mask = best_feats
+    assert best is not None and best_feats is not None
+    rs, rl, ratio, mask = best_feats
     return (
         {"ACCEL_SHORT_WINDOW": int(best["ws"]), "ACCEL_LONG_WINDOW": int(best["wl"]), "ACCEL_RATIO_THRESHOLD": float(best["rthr"])},
-        {"rate_short": rate_s, "rate_long": rate_l, "accel_ratio": ratio, "accel_mask": mask},
-        {"short_candidates": short_c, "long_candidates": long_c, "selected": best, "num_candidates": cand},
+        {"rate_short": rs, "rate_long": rl, "accel_ratio": ratio, "accel_mask": mask},
+        {"short_candidates": short_c, "long_candidates": long_c, "selected": best, "num_candidates": cand_count},
     )
 
 
-def mine_distribution(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
+def mine_distribution(grid: GridTape, coord_w: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
+    # candidate windows from coord and episode proxy on event bars
+    event_times = [grid.t[i] for i in range(grid.n) if grid.event_occurs[i]]
     lengths: List[int] = []
-    for idx in by_mint.values():
-        if not idx:
-            continue
-        tt = [tape.events[i].t for i in idx]
-        st = pv = tt[0]
-        for t in tt[1:]:
+    if event_times:
+        st = pv = event_times[0]
+        for t in event_times[1:]:
             if t - pv > coord_w:
                 lengths.append(pv - st)
                 st = t
@@ -581,9 +676,6 @@ def mine_distribution(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: i
     q75_ep = max(60, int(quantile(lengths, 0.75, float(med_ep))))
     cand_w = unique_sorted_ints(max(1, min(120, x // 60)) for x in [coord_w, med_ep, (coord_w + med_ep) // 2, q75_ep])
 
-    sides = [e.side for e in tape.events]
-    lamports = [e.sol_lamports for e in tape.events]
-
     best = None
     best_key = None
     best_feats = None
@@ -591,86 +683,57 @@ def mine_distribution(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: i
 
     for wmin in cand_w:
         W = wmin * 60
-        buy = [0] * tape.n
-        sell = [0] * tape.n
-        for idx in by_mint.values():
-            left = 0
-            b = s = 0
-            tt = [tape.events[i].t for i in idx]
-            for j, gi in enumerate(idx):
-                t = tt[j]
-                while left <= j and tt[left] < t - W:
-                    old = idx[left]
-                    if sides[old] == "buy":
-                        b -= 1
-                    if sides[old] == "sell":
-                        s -= 1
-                    left += 1
-                if sides[gi] == "buy":
-                    b += 1
-                if sides[gi] == "sell":
-                    s += 1
-                buy[gi] = b
-                sell[gi] = s
-        total = [buy[i] + sell[i] for i in range(tape.n)]
-        sell_ratio = [sell[i] / max(1, total[i]) for i in range(tape.n)]
-        net = [buy[i] - sell[i] for i in range(tape.n)]
-        sthr_c = sorted({quantile(sell_ratio, q) for q in (0.70, 0.80, 0.90, 0.95)}) or [0.6]
-        athr_c = unique_sorted_ints(max(1, int(quantile(total, q))) for q in (0.50, 0.60, 0.70, 0.80, 0.90)) or [1]
+        buy_roll = rolling_sum(grid.buy_count_bar, grid.t, W)
+        sell_roll = rolling_sum(grid.sell_count_bar, grid.t, W)
+        buy_lam_roll = rolling_sum(grid.lamports_buy_bar, grid.t, W)
+        sell_lam_roll = rolling_sum(grid.lamports_sell_bar, grid.t, W)
+        total = [buy_roll[i] + sell_roll[i] for i in range(grid.n)]
+        sell_ratio = [sell_roll[i] / max(1, total[i]) for i in range(grid.n)]
+        net = [buy_roll[i] - sell_roll[i] for i in range(grid.n)]
+
+        sthr_c = sorted({quantile(sell_ratio, q, 0.6) for q in (0.70, 0.80, 0.90, 0.95)}) or [0.6]
+        athr_c = unique_sorted_ints(max(1, int(quantile(total, q, 1.0))) for q in (0.50, 0.60, 0.70, 0.80, 0.90))
         for sthr in sthr_c:
             for athr in athr_c:
                 num += 1
-                mask = [(total[i] >= athr and sell_ratio[i] >= sthr and net[i] < 0) for i in range(tape.n)]
-                meaningful = sum(1 for x in total if x >= athr) / max(1, tape.n)
-                act = sum(mask) / max(1, tape.n)
-                trans = 0
-                hours = 0.0
-                for idx in by_mint.values():
-                    m = [mask[i] for i in idx]
-                    trans += sum(1 for i in range(1, len(m)) if m[i] != m[i - 1])
-                    if len(idx) >= 2:
-                        hours += max(1, tape.events[idx[-1]].t - tape.events[idx[0]].t) / 3600.0
-                flick = trans / hours if hours > 0 else float("inf")
+                mask = [total[i] >= athr and sell_ratio[i] >= sthr and net[i] < 0 for i in range(grid.n)]
+                meaningful = sum(1 for x in total if x >= athr) / max(1, grid.n)
+                act = sum(mask) / max(1, grid.n)
+                flick = transitions_per_hour(mask, grid)
                 key = (abs(meaningful - 0.25), abs(act - 0.08), flick, wmin, sthr, athr)
                 if best_key is None or key < best_key:
                     best_key = key
-                    best = {"wmin": wmin, "sthr": float(sthr), "athr": int(athr), "activation": act, "meaningful": meaningful, "flicker": flick}
-                    best_feats = (buy, sell, total, sell_ratio, net, mask)
+                    best = {"wmin": wmin, "sthr": float(sthr), "athr": int(athr), "activation": act, "flicker": flick}
+                    best_feats = (buy_roll, sell_roll, buy_lam_roll, sell_lam_roll, total, sell_ratio, net, mask)
 
-    assert best and best_feats
-    buy, sell, total, sell_ratio, net, mask = best_feats
+    assert best is not None and best_feats is not None
+    buy_roll, sell_roll, buy_lam_roll, sell_lam_roll, total, sell_ratio, net, mask = best_feats
     return (
         {"NET_FLOW_WINDOW": int(best["wmin"]), "SELL_DOM_THRESHOLD": float(best["sthr"]), "MIN_ACTIVITY_FOR_DISTRIBUTION": int(best["athr"])},
-        {"buy_count": buy, "sell_count": sell, "activity_count": total, "sell_ratio": sell_ratio, "net_flow": net, "distribution_mask": mask},
+        {
+            "buy_count": buy_roll,
+            "sell_count": sell_roll,
+            "buy_lamports": buy_lam_roll,
+            "sell_lamports": sell_lam_roll,
+            "activity_count": total,
+            "sell_ratio": sell_ratio,
+            "net_flow": net,
+            "distribution_mask": mask,
+        },
         {"window_candidates_min": cand_w, "selected": best, "num_candidates": num},
     )
 
 
-def mine_expansion(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
+def mine_expansion(grid: GridTape, coord_w: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
     W = max(30, coord_w)
-    growth = [0.0] * tape.n
-    diversity = [0.0] * tape.n
-    for idx in by_mint.values():
-        tt = [tape.events[i].t for i in idx]
-        ww = [tape.events[i].wallet for i in idx]
-        left = 0
-        counts: Dict[str, int] = defaultdict(int)
-        for j, gi in enumerate(idx):
-            t = tt[j]
-            while left <= j and tt[left] < t - W:
-                w = ww[left]
-                counts[w] -= 1
-                if counts[w] <= 0:
-                    del counts[w]
-                left += 1
-            counts[ww[j]] += 1
-            uniq = len(counts)
-            ev = j - left + 1
-            growth[gi] = float(uniq)
-            diversity[gi] = float(uniq) / max(1, ev)
+    events_roll = rolling_sum(grid.event_count_bar, grid.t, W)
+    # deterministic diversity proxy from event bar frequency
+    active_bars_roll = rolling_sum([1 if x > 0 else 0 for x in grid.event_count_bar], grid.t, W)
+    growth = [float(max(0, int(round(math.sqrt(max(0, events_roll[i])))))) for i in range(grid.n)]
+    diversity = [float(active_bars_roll[i]) / max(1.0, float(events_roll[i])) for i in range(grid.n)]
 
-    gthr_c = sorted({quantile(growth, q) for q in (0.60, 0.70, 0.80, 0.90) if quantile(growth, q) >= 2.0}) or [2.0]
-    dthr_c = sorted({quantile(diversity, q) for q in (0.50, 0.60, 0.70, 0.80, 0.90) if quantile(diversity, q) > 0.0}) or [0.5]
+    gthr_c = sorted({quantile(growth, q, 2.0) for q in (0.60, 0.70, 0.80, 0.90) if quantile(growth, q, 2.0) >= 2.0}) or [2.0]
+    dthr_c = sorted({quantile(diversity, q, 0.5) for q in (0.50, 0.60, 0.70, 0.80, 0.90) if quantile(diversity, q, 0.5) > 0}) or [0.5]
 
     best = None
     best_key = None
@@ -679,23 +742,16 @@ def mine_expansion(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: int)
     for gt in gthr_c:
         for dt in dthr_c:
             num += 1
-            mask = [(growth[i] >= gt and diversity[i] >= dt) for i in range(tape.n)]
-            act = sum(mask) / max(1, tape.n)
-            trans = 0
-            hours = 0.0
-            for idx in by_mint.values():
-                m = [mask[i] for i in idx]
-                trans += sum(1 for i in range(1, len(m)) if m[i] != m[i - 1])
-                if len(idx) >= 2:
-                    hours += max(1, tape.events[idx[-1]].t - tape.events[idx[0]].t) / 3600.0
-            flick = trans / hours if hours > 0 else float("inf")
+            mask = [growth[i] >= gt and diversity[i] >= dt for i in range(grid.n)]
+            act = sum(mask) / max(1, grid.n)
+            flick = transitions_per_hour(mask, grid)
             key = (abs(act - 0.10), flick, -gt, -dt)
             if best_key is None or key < best_key:
                 best_key = key
                 best = {"gt": float(gt), "dt": float(dt), "activation": act, "flicker": flick}
                 best_mask = mask
 
-    assert best and best_mask is not None
+    assert best is not None and best_mask is not None
     return (
         {"EXPANSION_GROWTH_THRESHOLD": float(best["gt"]), "DIVERSITY_THRESHOLD": float(best["dt"])},
         {"growth": growth, "diversity": diversity, "expansion_mask": best_mask},
@@ -703,42 +759,54 @@ def mine_expansion(tape: EventTape, by_mint: Dict[str, List[int]], coord_w: int)
     )
 
 
-def build_gap_prev_and_prevcount(tape: EventTape, by_mint: Dict[str, List[int]], death_window: int) -> Tuple[List[int], List[int]]:
-    gap_prev = [10**9] * tape.n
-    prev_count = [0] * tape.n
-    for idx in by_mint.values():
-        tt = [tape.events[i].t for i in idx]
-        _, _, _, prev = rolling_window_counts(tt, [tape.events[i].wallet for i in idx], death_window)
-        for j, gi in enumerate(idx):
-            if j > 0:
-                gap_prev[gi] = tt[j] - tt[j - 1]
-            prev_count[gi] = prev[j]
-    return gap_prev, prev_count
+def assign_states(grid: GridTape, thresholds: Dict[str, Any], feats: Dict[str, List[Any]]) -> Tuple[Dict[str, List[bool]], List[str]]:
+    death_thr = int(thresholds["DEATH_SILENCE_THRESHOLD"])
+    ign_thr = int(thresholds["IGNITION_SILENCE_THRESHOLD"])
+    if death_thr <= ign_thr:
+        raise RuntimeError("Invariant violated: DEATH_SILENCE_THRESHOLD must be > IGNITION_SILENCE_THRESHOLD")
 
+    coord_w = int(thresholds["COORD_WINDOW_SECONDS"])
+    events_in_death = rolling_sum(grid.event_count_bar, grid.t, death_thr)
+    events_in_coord = rolling_sum(grid.event_count_bar, grid.t, coord_w)
 
-def assign_states(tape: EventTape, by_mint: Dict[str, List[int]], thr: Dict[str, Any], feats: Dict[str, List[Any]]) -> Tuple[Dict[str, List[bool]], List[str]]:
-    death_w = int(thr["DEATH_SILENCE_THRESHOLD"])
-    ignition_w = int(thr["IGNITION_SILENCE_THRESHOLD"])
-    if death_w <= ignition_w:
-        raise RuntimeError("Invariant violated: DEATH_SILENCE_THRESHOLD must be greater than IGNITION_SILENCE_THRESHOLD.")
+    # Hard requirement: DEATH false at any grid time with an event
+    death = [
+        (events_in_death[i] == 0) and (grid.time_since_last_event[i] >= death_thr) and (not grid.event_occurs[i])
+        for i in range(grid.n)
+    ]
 
-    gap_prev, prev_count_death = build_gap_prev_and_prevcount(tape, by_mint, death_w)
+    # ignition on first grid time where event occurs and prior silence >= ignition and not death
+    ignition = []
+    for i in range(grid.n):
+        cond = (
+            grid.event_occurs[i]
+            and grid.gap_to_prev_event_for_bar_event[i] >= ign_thr
+            and (not death[i])
+        )
+        ignition.append(cond)
 
     coord = feats["coord_mask"]
     accel = feats["accel_mask"]
     distr = feats["distribution_mask"]
     expan = feats["expansion_mask"]
+
     rate_long = feats["rate_long"]
     early_thr = quantile(rate_long, 0.75, 0.0)
+    early = [rate_long[i] >= early_thr and not coord[i] and not accel[i] and not distr[i] and not expan[i] for i in range(grid.n)]
 
-    death = [(gap_prev[i] >= death_w and prev_count_death[i] == 0) for i in range(tape.n)]
-    ignition = [(gap_prev[i] >= ignition_w and gap_prev[i] < death_w and prev_count_death[i] == 0) for i in range(tape.n)]
-    early = [(rate_long[i] >= early_thr and not coord[i] and not accel[i] and not distr[i] and not expan[i]) for i in range(tape.n)]
     quiet = [
-        (not death[i]) and (gap_prev[i] > 0) and (gap_prev[i] < ignition_w) and (not coord[i]) and (not accel[i]) and (not distr[i]) and (not expan[i])
-        for i in range(tape.n)
+        (not death[i])
+        and (not ignition[i])
+        and grid.time_since_last_event[i] < ign_thr
+        and (not coord[i])
+        and (not accel[i])
+        and (not distr[i])
+        and (not expan[i])
+        for i in range(grid.n)
     ]
-    base = [True] * tape.n
+
+    # Sink: only when recent activity exists and no stronger state true
+    base = [events_in_coord[i] > 0 for i in range(grid.n)]
 
     states = {
         "TOKEN_DEATH": death,
@@ -752,52 +820,60 @@ def assign_states(tape: EventTape, by_mint: Dict[str, List[int]], thr: Dict[str,
         "TOKEN_BASE_ACTIVITY": base,
     }
 
-    final = [""] * tape.n
+    final = [""] * grid.n
     for s in STATE_ORDER:
-        for i in range(tape.n):
+        for i in range(grid.n):
             if final[i] == "" and states[s][i]:
                 final[i] = s
-    for i in range(tape.n):
-        if not final[i]:
-            final[i] = "TOKEN_BASE_ACTIVITY"
+    for i in range(grid.n):
+        if final[i] == "":
+            final[i] = "TOKEN_QUIET"
     return states, final
 
 
-def overlap_counts(states: Dict[str, List[bool]]) -> Dict[Tuple[str, str], int]:
-    out: Dict[Tuple[str, str], int] = {}
+def overlap_counts(states: Dict[str, List[bool]]) -> Dict[Tuple[str, str], Tuple[int, int]]:
+    out: Dict[Tuple[str, str], Tuple[int, int]] = {}
     for a in STATE_ORDER:
         for b in STATE_ORDER:
-            out[(a, b)] = sum(1 for i in range(len(states[a])) if states[a][i] and states[b][i])
+            inc = sum(1 for i in range(len(states[a])) if states[a][i] and states[b][i])
+            if a == "TOKEN_BASE_ACTIVITY" or b == "TOKEN_BASE_ACTIVITY":
+                exc = 0
+            else:
+                exc = inc
+            out[(a, b)] = (inc, exc)
     return out
 
 
-def transition_rows(tape: EventTape, by_mint: Dict[str, List[int]], final: List[str]) -> List[Tuple[str, float, int, int]]:
+def transition_rows(grid: GridTape, final: List[str]) -> List[Tuple[str, float, int, int]]:
     rows = []
-    for mint, idx in by_mint.items():
-        if len(idx) <= 1:
-            rows.append((mint, 0.0, 0, len(idx)))
-            continue
-        seq = [final[i] for i in idx]
+    for mint in sorted(grid.mint_ranges):
+        s, e = grid.mint_ranges[mint]
+        seq = final[s:e]
         trans = sum(1 for i in range(1, len(seq)) if seq[i] != seq[i - 1])
-        dur = max(1, tape.events[idx[-1]].t - tape.events[idx[0]].t)
-        tph = trans / (dur / 3600.0)
-        rows.append((mint, tph, trans, len(idx)))
-    rows.sort(key=lambda r: (-r[1], r[0]))
+        if e - s >= 2:
+            dur = max(1, grid.t[e - 1] - grid.t[s])
+            tph = trans / (dur / 3600.0)
+        else:
+            tph = 0.0
+        rows.append((mint, tph, trans, e - s))
+    rows.sort(key=lambda x: (-x[1], x[0]))
     return rows
 
 
-def write_artifacts(outdir: Path, thresholds: Dict[str, Any], tape: EventTape, by_mint: Dict[str, List[int]], states: Dict[str, List[bool]], final: List[str]) -> Dict[str, str]:
+def write_artifacts(outdir: Path, thresholds: Dict[str, Any], grid: GridTape, states: Dict[str, List[bool]], final: List[str]) -> Dict[str, str]:
     outdir.mkdir(parents=True, exist_ok=True)
-    thr_json = json.dumps(thresholds, sort_keys=True, indent=2)
-    (outdir / "thresholds.json").write_text(thr_json + "\n", encoding="utf-8")
 
-    ov = overlap_counts(states)
+    thresholds_json = json.dumps(thresholds, sort_keys=True, indent=2)
+    (outdir / "thresholds.json").write_text(thresholds_json + "\n", encoding="utf-8")
+
+    overlaps = overlap_counts(states)
     with (outdir / "state_overlap_matrix.tsv").open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t")
-        w.writerow(["state_a", "state_b", "count"])
+        w.writerow(["state_a", "state_b", "overlaps_including_base", "overlaps_excluding_base"])
         for a in STATE_ORDER:
             for b in STATE_ORDER:
-                w.writerow([a, b, ov[(a, b)]])
+                inc, exc = overlaps[(a, b)]
+                w.writerow([a, b, inc, exc])
 
     counts = Counter(final)
     with (outdir / "post_arbitration_state_counts.tsv").open("w", encoding="utf-8", newline="") as f:
@@ -808,62 +884,57 @@ def write_artifacts(outdir: Path, thresholds: Dict[str, Any], tape: EventTape, b
             p = c / max(1, len(final))
             w.writerow([s, c, f"{p:.8f}"])
 
-    trans = transition_rows(tape, by_mint, final)
+    tr = transition_rows(grid, final)
     with (outdir / "transition_rate_report.tsv").open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter="\t")
-        w.writerow(["mint", "transitions_per_hour", "transition_count", "event_count"])
-        for r in trans:
-            w.writerow([r[0], f"{r[1]:.8f}", r[2], r[3]])
+        w.writerow(["mint", "transitions_per_hour", "transition_count", "grid_points"])
+        for mint, tph, tc, n in tr:
+            w.writerow([mint, f"{tph:.8f}", tc, n])
 
+    # collisions use excluding-base metric semantics
     with (outdir / "top_collision_examples.jsonl").open("w", encoding="utf-8") as f:
-        count = 0
-        for i, e in enumerate(tape.events):
-            trues = [s for s in STATE_ORDER if states[s][i]]
-            if len(trues) > 1:
-                if "TOKEN_DEATH" in trues:
-                    activity_states = {"TOKEN_DISTRIBUTION", "TOKEN_EXPANSION", "TOKEN_COORDINATION", "TOKEN_ACCELERATION", "TOKEN_EARLY_TREND", "TOKEN_IGNITION", "TOKEN_BASE_ACTIVITY"}
-                    trues = [s for s in trues if not (s == "TOKEN_DEATH" and any(x in activity_states for x in trues))]
-                if len(trues) > 1:
-                    f.write(json.dumps({"mint": e.mint, "time": e.t, "states_true": trues}, sort_keys=True) + "\n")
-                    count += 1
-                    if count >= 500:
-                        break
+        num = 0
+        for i in range(grid.n):
+            trues_ex_base = [s for s in STATE_ORDER if s != "TOKEN_BASE_ACTIVITY" and states[s][i]]
+            if len(trues_ex_base) > 1:
+                rec = {"mint": grid.mint[i], "time": grid.t[i], "states_true": trues_ex_base}
+                f.write(json.dumps(rec, sort_keys=True) + "\n")
+                num += 1
+                if num >= 500:
+                    break
 
     with (outdir / "top_flicker_examples.jsonl").open("w", encoding="utf-8") as f:
-        for mint, tph, tc, ec in trans[:50]:
-            f.write(json.dumps({"mint": mint, "transitions_per_hour": tph, "transition_count": tc, "event_count": ec}, sort_keys=True) + "\n")
+        for mint, tph, tc, n in tr[:50]:
+            f.write(json.dumps({"mint": mint, "transitions_per_hour": tph, "transition_count": tc, "grid_points": n}, sort_keys=True) + "\n")
 
     return {
-        "thresholds_json": thr_json,
+        "thresholds_json": thresholds_json,
         "post_counts_tsv": (outdir / "post_arbitration_state_counts.tsv").read_text(encoding="utf-8"),
     }
 
 
-def run_once(db: Path, outdir: Path, strict: bool) -> Dict[str, str]:
+def run_once(db: Path, outdir: Path, grid_seconds: int) -> Dict[str, str]:
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     try:
         schema = discover_schema(conn)
         if not schema:
             raise RuntimeError("No tables found in SQLite DB.")
-        tape, source = build_event_tape(conn, schema, strict, outdir)
-        by_mint = indices_by_mint(tape)
 
-        gaps = []
-        for idx in by_mint.values():
-            for j in range(1, len(idx)):
-                g = tape.events[idx[j]].t - tape.events[idx[j - 1]].t
-                if g > 0:
-                    gaps.append(g)
+        event_tape, source_report = build_event_tape(conn, schema, outdir)
+        gaps = collect_event_gaps(event_tape.events)
         if not gaps:
             raise RuntimeError("Cannot mine thresholds: no positive inter-event gaps.")
 
-        ignition_thr, death_thr, silence_report = mine_silence_thresholds(tape, by_mint)
+        ign_thr, death_thr, silence_report = mine_silence_thresholds(gaps)
+        if death_thr <= ign_thr:
+            death_thr = ign_thr + max(1, ign_thr // 5)
 
-        coord_params, coord_feats, coord_report = mine_coordination(tape, by_mint, gaps)
-        accel_params, accel_feats, accel_report = mine_acceleration(tape, by_mint, coord_params["COORD_WINDOW_SECONDS"], coord_feats["coord_mask"])
-        dist_params, dist_feats, dist_report = mine_distribution(tape, by_mint, coord_params["COORD_WINDOW_SECONDS"])
-        exp_params, exp_feats, exp_report = mine_expansion(tape, by_mint, coord_params["COORD_WINDOW_SECONDS"])
+        grid = build_grid_tape(event_tape, grid_seconds)
+        coord_params, coord_feats, coord_report = mine_coordination(grid, gaps, death_thr)
+        accel_params, accel_feats, accel_report = mine_acceleration(grid, int(coord_params["COORD_WINDOW_SECONDS"]), coord_feats["coord_mask"])
+        dist_params, dist_feats, dist_report = mine_distribution(grid, int(coord_params["COORD_WINDOW_SECONDS"]))
+        exp_params, exp_feats, exp_report = mine_expansion(grid, int(coord_params["COORD_WINDOW_SECONDS"]))
 
         feats: Dict[str, List[Any]] = {}
         feats.update(coord_feats)
@@ -876,31 +947,28 @@ def run_once(db: Path, outdir: Path, strict: bool) -> Dict[str, str]:
         thresholds.update(accel_params)
         thresholds.update(dist_params)
         thresholds.update(exp_params)
-        thresholds["IGNITION_SILENCE_THRESHOLD"] = int(ignition_thr)
+        thresholds["GRID_SECONDS"] = int(grid_seconds)
+        thresholds["IGNITION_SILENCE_THRESHOLD"] = int(ign_thr)
         thresholds["DEATH_SILENCE_THRESHOLD"] = int(death_thr)
 
-        # enforce invariant strictly
-        if thresholds["DEATH_SILENCE_THRESHOLD"] <= thresholds["IGNITION_SILENCE_THRESHOLD"]:
-            thresholds["DEATH_SILENCE_THRESHOLD"] = thresholds["IGNITION_SILENCE_THRESHOLD"] + max(1, thresholds["IGNITION_SILENCE_THRESHOLD"] // 5)
+        states, final = assign_states(grid, thresholds, feats)
 
-        states, final = assign_states(tape, by_mint, thresholds, feats)
-
-        # ensure ignition is reachable where data allows
+        # ensure ignition appears when historical data has eligible gaps
         ign_count = sum(1 for s in final if s == "TOKEN_IGNITION")
         if ign_count == 0:
-            viable = [g for g in gaps if g < thresholds["DEATH_SILENCE_THRESHOLD"]]
-            if viable:
-                thresholds["IGNITION_SILENCE_THRESHOLD"] = max(1, int(quantile(viable, 0.70)))
+            eligible = [g for g in gaps if g < thresholds["DEATH_SILENCE_THRESHOLD"]]
+            if eligible:
+                thresholds["IGNITION_SILENCE_THRESHOLD"] = max(1, int(quantile(eligible, 0.70, 1.0)))
                 if thresholds["DEATH_SILENCE_THRESHOLD"] <= thresholds["IGNITION_SILENCE_THRESHOLD"]:
                     thresholds["DEATH_SILENCE_THRESHOLD"] = thresholds["IGNITION_SILENCE_THRESHOLD"] + 1
-                states, final = assign_states(tape, by_mint, thresholds, feats)
+                states, final = assign_states(grid, thresholds, feats)
 
         thresholds["metadata"] = {
             "db_sha256": sha256_file(db),
             "script_sha256": sha256_file(Path(__file__).resolve()),
             "run_timestamp_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             "deterministic_seed": 0,
-            "event_source": source,
+            "event_source": source_report,
             "reports": {
                 "silence": silence_report,
                 "coordination": coord_report,
@@ -911,19 +979,25 @@ def run_once(db: Path, outdir: Path, strict: bool) -> Dict[str, str]:
         }
 
         (outdir / "mining_report.json").write_text(
-            json.dumps({
-                "schema_tables": sorted(schema.keys()),
-                "source": source,
-                "silence": silence_report,
-                "coordination": coord_report,
-                "acceleration": accel_report,
-                "distribution": dist_report,
-                "expansion": exp_report,
-            }, sort_keys=True, indent=2) + "\n",
+            json.dumps(
+                {
+                    "schema_tables": sorted(schema.keys()),
+                    "source": source_report,
+                    "silence": silence_report,
+                    "coordination": coord_report,
+                    "acceleration": accel_report,
+                    "distribution": dist_report,
+                    "expansion": exp_report,
+                    "grid_seconds": grid_seconds,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
-        return write_artifacts(outdir, thresholds, tape, by_mint, states, final)
+        return write_artifacts(outdir, thresholds, grid, states, final)
     finally:
         conn.close()
 
@@ -933,6 +1007,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--db", required=True)
     p.add_argument("--outdir", required=True)
     p.add_argument("--strict", action="store_true")
+    p.add_argument("--grid-seconds", type=int, default=60, help="Per-mint regular grid step in seconds (default: 60)")
     return p.parse_args(argv)
 
 
@@ -943,19 +1018,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not db.exists():
         eprint(f"ERROR: DB not found: {db}")
         return 1
-    try:
-        run1 = run_once(db, outdir, args.strict)
-        run2 = run_once(db, outdir, args.strict)
+    if args.grid_seconds <= 0:
+        eprint("ERROR: --grid-seconds must be positive")
+        return 1
 
-        t1 = json.loads(run1["thresholds_json"])
-        t2 = json.loads(run2["thresholds_json"])
-        for t in (t1, t2):
-            if "metadata" in t and "run_timestamp_utc" in t["metadata"]:
-                t["metadata"]["run_timestamp_utc"] = "<normalized>"
-        if json.dumps(t1, sort_keys=True) != json.dumps(t2, sort_keys=True):
-            raise RuntimeError("Determinism check failed: thresholds.json content mismatch across two in-process runs")
-        if run1["post_counts_tsv"] != run2["post_counts_tsv"]:
-            raise RuntimeError("Determinism check failed: post_arbitration_state_counts.tsv mismatch across runs")
+    try:
+        first = run_once(db, outdir, args.grid_seconds)
+        second = run_once(db, outdir, args.grid_seconds)
+
+        j1 = json.loads(first["thresholds_json"])
+        j2 = json.loads(second["thresholds_json"])
+        for j in (j1, j2):
+            if "metadata" in j and "run_timestamp_utc" in j["metadata"]:
+                j["metadata"]["run_timestamp_utc"] = "<normalized>"
+        if json.dumps(j1, sort_keys=True) != json.dumps(j2, sort_keys=True):
+            raise RuntimeError("Determinism check failed: thresholds content mismatch")
+        if first["post_counts_tsv"] != second["post_counts_tsv"]:
+            raise RuntimeError("Determinism check failed: post_arbitration_state_counts.tsv mismatch")
         return 0
     except Exception as ex:
         eprint(f"ERROR: {ex}")
