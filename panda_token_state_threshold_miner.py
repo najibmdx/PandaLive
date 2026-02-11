@@ -249,6 +249,38 @@ def build_tape_from_whale_events(conn: sqlite3.Connection, cols: List[str]) -> T
     return EventTape(events), report
 
 
+def whale_events_has_token_mint(cols: List[str]) -> bool:
+    return pick_col(cols, ["mint", "token_mint", "token", "in_mint", "out_mint"]) is not None
+
+
+def _resolve_swap_mint(
+    token_mint: Optional[Any],
+    in_mint: Optional[Any],
+    out_mint: Optional[Any],
+) -> str:
+    if token_mint is not None and str(token_mint).strip():
+        return str(token_mint).strip()
+
+    sol_like = {
+        "sol",
+        "wsol",
+        "So11111111111111111111111111111111111111112",
+    }
+    in_s = "" if in_mint is None else str(in_mint).strip()
+    out_s = "" if out_mint is None else str(out_mint).strip()
+
+    in_is_sol = in_s in sol_like
+    out_is_sol = out_s in sol_like
+
+    if in_s and not in_is_sol and (out_is_sol or not out_s):
+        return in_s
+    if out_s and not out_is_sol and (in_is_sol or not in_s):
+        return out_s
+    if out_s:
+        return out_s
+    return in_s
+
+
 def build_tape_from_swaps(conn: sqlite3.Connection, schema: Dict[str, List[str]]) -> Tuple[EventTape, Dict[str, Any]]:
     table = None
     for t in sorted(schema):
@@ -259,23 +291,39 @@ def build_tape_from_swaps(conn: sqlite3.Connection, schema: Dict[str, List[str]]
         raise RuntimeError("No swaps-like table found for fallback.")
 
     cols = schema[table]
-    mint_c = pick_col(cols, ["mint", "token_mint", "token"])
+    mint_c = pick_col(cols, ["token_mint", "mint", "token"])
+    in_mint_c = pick_col(cols, ["in_mint", "mint_in", "from_mint"])
+    out_mint_c = pick_col(cols, ["out_mint", "mint_out", "to_mint"])
     t_c = pick_col(cols, ["t", "time", "timestamp", "ts", "block_time"])
     wallet_c = pick_col(cols, ["wallet", "owner", "trader", "address", "signer"])
     side_c = pick_col(cols, ["side", "direction", "action"])
     lam_c = pick_col(cols, ["sol_lamports", "lamports", "size_lamports", "amount_lamports", "value_lamports"])
-    if not (mint_c and t_c and wallet_c and lam_c):
-        raise RuntimeError("Fallback swaps table missing required mint/time/wallet/lamports columns.")
+    if not (t_c and wallet_c and lam_c):
+        raise RuntimeError("Fallback swaps table missing required time/wallet/lamports columns.")
+    if not (mint_c or (in_mint_c and out_mint_c)):
+        raise RuntimeError("Fallback swaps table missing token_mint and no usable in_mint/out_mint pair.")
 
-    use_cols = [mint_c, t_c, wallet_c, lam_c] + ([side_c] if side_c else [])
+    use_cols = [t_c, wallet_c, lam_c]
+    if mint_c:
+        use_cols.append(mint_c)
+    if in_mint_c:
+        use_cols.append(in_mint_c)
+    if out_mint_c:
+        use_cols.append(out_mint_c)
+    if side_c:
+        use_cols.append(side_c)
     idx = {c: i for i, c in enumerate(use_cols)}
     raw: List[Tuple[str, int, str, str, int]] = []
     lamports: List[int] = []
     for r in fetch_rows(conn, table, use_cols):
-        mint = "" if r[idx[mint_c]] is None else str(r[idx[mint_c]]).strip()
         t = safe_int(r[idx[t_c]])
         wallet = "" if r[idx[wallet_c]] is None else str(r[idx[wallet_c]]).strip()
         lv = safe_int(r[idx[lam_c]])
+        mint = _resolve_swap_mint(
+            r[idx[mint_c]] if mint_c else None,
+            r[idx[in_mint_c]] if in_mint_c else None,
+            r[idx[out_mint_c]] if out_mint_c else None,
+        )
         if not mint or t is None or not wallet or lv is None:
             continue
         lam = abs(int(lv))
@@ -298,16 +346,52 @@ def build_tape_from_swaps(conn: sqlite3.Connection, schema: Dict[str, List[str]]
     return EventTape(events), rep
 
 
-def build_event_tape(conn: sqlite3.Connection, schema: Dict[str, List[str]], outdir: Path) -> Tuple[EventTape, Dict[str, Any]]:
-    if "whale_events" in schema:
+def build_event_tape(
+    conn: sqlite3.Connection,
+    schema: Dict[str, List[str]],
+    outdir: Path,
+    source_mode: str,
+    strict: bool,
+) -> Tuple[EventTape, Dict[str, Any], str]:
+    has_whale = "whale_events" in schema
+    whale_token_aware = has_whale and whale_events_has_token_mint(schema["whale_events"])
+
+    if source_mode == "swaps":
+        tape, rep = build_tape_from_swaps(conn, schema)
+        return tape, {"source": rep["source"], "fallback_report": rep}, "swaps"
+
+    if source_mode == "whale_events":
+        if not has_whale:
+            if strict:
+                raise RuntimeError("Requested --source whale_events but table whale_events is missing.")
+            eprint("[WARN] whale_events table missing; falling back to swaps")
+            tape, rep = build_tape_from_swaps(conn, schema)
+            return tape, {"source": rep["source"], "fallback_report": rep}, "swaps"
+        if not whale_token_aware:
+            msg = "Requested --source whale_events but whale_events has no mint linkage (no mint/token_mint/in_mint/out_mint)."
+            if strict:
+                raise RuntimeError(msg)
+            eprint(f"[WARN] {msg} Falling back to swaps")
+            tape, rep = build_tape_from_swaps(conn, schema)
+            return tape, {"source": rep["source"], "fallback_report": rep}, "swaps"
+        tape, rep = build_tape_from_whale_events(conn, schema["whale_events"])
+        if tape is None:
+            outdir.mkdir(parents=True, exist_ok=True)
+            (outdir / "whale_events_unusable_report.json").write_text(json.dumps(rep, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+            raise RuntimeError("whale_events table exists but is unusable; see whale_events_unusable_report.json")
+        return tape, {"source": "whale_events", "whale_events_report": rep}, "whale_events"
+
+    # auto mode
+    if has_whale and whale_token_aware:
         tape, rep = build_tape_from_whale_events(conn, schema["whale_events"])
         if tape is not None:
-            return tape, {"source": "whale_events", "whale_events_report": rep}
+            return tape, {"source": "whale_events", "whale_events_report": rep}, "whale_events"
         outdir.mkdir(parents=True, exist_ok=True)
         (outdir / "whale_events_unusable_report.json").write_text(json.dumps(rep, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         raise RuntimeError("whale_events table exists but is unusable; see whale_events_unusable_report.json")
+
     tape, rep = build_tape_from_swaps(conn, schema)
-    return tape, {"source": rep["source"], "fallback_report": rep}
+    return tape, {"source": rep["source"], "fallback_report": rep}, "swaps"
 
 
 def split_by_mint(events: List[Event]) -> Dict[str, List[Event]]:
@@ -1025,7 +1109,7 @@ def write_artifacts(outdir: Path, thresholds: Dict[str, Any], grid: GridTape, st
     }
 
 
-def run_once(db: Path, outdir: Path, grid_seconds: int) -> Dict[str, str]:
+def run_once(db: Path, outdir: Path, grid_seconds: int, source_mode: str, strict: bool) -> Dict[str, str]:
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     try:
@@ -1033,7 +1117,8 @@ def run_once(db: Path, outdir: Path, grid_seconds: int) -> Dict[str, str]:
         if not schema:
             raise RuntimeError("No tables found in SQLite DB.")
 
-        event_tape, source_report = build_event_tape(conn, schema, outdir)
+        event_tape, source_report, resolved_source = build_event_tape(conn, schema, outdir, source_mode, strict)
+        print(f"[INFO] token_state_source={resolved_source}")
         gaps = collect_event_gaps(event_tape.events)
         if not gaps:
             raise RuntimeError("Cannot mine thresholds: no positive inter-event gaps.")
@@ -1119,6 +1204,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--outdir", required=True)
     p.add_argument("--strict", action="store_true")
     p.add_argument("--grid-seconds", type=int, default=60, help="Per-mint regular grid step in seconds (default: 60)")
+    p.add_argument("--source", choices=["auto", "swaps", "whale_events"], default="auto", help="Token-state source selection (default: auto)")
     return p.parse_args(argv)
 
 
@@ -1134,8 +1220,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     try:
-        first = run_once(db, outdir, args.grid_seconds)
-        second = run_once(db, outdir, args.grid_seconds)
+        first = run_once(db, outdir, args.grid_seconds, args.source, args.strict)
+        second = run_once(db, outdir, args.grid_seconds, args.source, args.strict)
 
         j1 = json.loads(first["thresholds_json"])
         j2 = json.loads(second["thresholds_json"])
