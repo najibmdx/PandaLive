@@ -13,11 +13,11 @@ import json
 import math
 import sqlite3
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 STATE_ORDER = [
@@ -31,6 +31,10 @@ STATE_ORDER = [
     "TOKEN_QUIET",
     "TOKEN_BASE_ACTIVITY",
 ]
+
+
+KNOWN_BUY = "buy"
+KNOWN_SELL = "sell"
 
 
 def eprint(msg: str) -> None:
@@ -114,7 +118,12 @@ class GridTape:
     lamports_sell_bar: List[int]
     time_since_last_event: List[int]
     gap_to_prev_event_for_bar_event: List[int]
-    mint_ranges: Dict[str, Tuple[int, int]]  # [start, end)
+    # per-bar compact real observables
+    bar_wallets_dedup: List[Tuple[str, ...]]
+    bar_event_times: List[Tuple[int, ...]]
+    bar_event_wallets: List[Tuple[str, ...]]
+    bar_event_sides: List[Tuple[str, ...]]
+    mint_ranges: Dict[str, Tuple[int, int]]
 
     @property
     def n(self) -> int:
@@ -154,6 +163,17 @@ def fetch_rows(conn: sqlite3.Connection, table: str, cols: Sequence[str]) -> Ite
             break
         for row in batch:
             yield row
+
+
+def normalize_side(v: Any) -> str:
+    if v is None:
+        return "unknown"
+    s = str(v).strip().lower()
+    if s in {"buy", "b", "bid", "long", "in"}:
+        return KNOWN_BUY
+    if s in {"sell", "s", "ask", "short", "out"}:
+        return KNOWN_SELL
+    return "unknown"
 
 
 def build_tape_from_whale_events(conn: sqlite3.Connection, cols: List[str]) -> Tuple[Optional[EventTape], Dict[str, Any]]:
@@ -199,9 +219,8 @@ def build_tape_from_whale_events(conn: sqlite3.Connection, cols: List[str]) -> T
         if not wallet:
             bad_wallet += 1
             continue
-        side = "unknown"
-        if side_c and r[idx[side_c]] is not None:
-            side = str(r[idx[side_c]]).lower().strip()
+
+        side = normalize_side(r[idx[side_c]]) if side_c else "unknown"
         lam = 0
         if lam_c:
             lv = safe_int(r[idx[lam_c]])
@@ -260,9 +279,7 @@ def build_tape_from_swaps(conn: sqlite3.Connection, schema: Dict[str, List[str]]
         if not mint or t is None or not wallet or lv is None:
             continue
         lam = abs(int(lv))
-        side = "unknown"
-        if side_c and r[idx[side_c]] is not None:
-            side = str(r[idx[side_c]]).lower().strip()
+        side = normalize_side(r[idx[side_c]]) if side_c else "unknown"
         raw.append((mint, int(t), wallet, side, lam))
         lamports.append(lam)
     if not raw:
@@ -315,6 +332,10 @@ def build_grid_tape(tape: EventTape, grid_seconds: int) -> GridTape:
     lam_sell_bar: List[int] = []
     time_since_last: List[int] = []
     gap_to_prev_for_event_bar: List[int] = []
+    bar_wallets_dedup: List[Tuple[str, ...]] = []
+    bar_event_times: List[Tuple[int, ...]] = []
+    bar_event_wallets: List[Tuple[str, ...]] = []
+    bar_event_sides: List[Tuple[str, ...]] = []
     mint_ranges: Dict[str, Tuple[int, int]] = {}
 
     for mint in sorted(by_mint):
@@ -332,44 +353,48 @@ def build_grid_tape(tape: EventTape, grid_seconds: int) -> GridTape:
 
         for T in times:
             bar_start = T - grid_seconds
-            bar_events: List[Event] = []
+            curr: List[Event] = []
             while ei < len(evs) and evs[ei].t <= T:
                 if evs[ei].t > bar_start:
-                    bar_events.append(evs[ei])
+                    curr.append(evs[ei])
                 ei += 1
 
-            occurs = len(bar_events) > 0
-            b = sum(1 for e in bar_events if e.side == "buy")
-            s = sum(1 for e in bar_events if e.side == "sell")
-            lb = sum(int(e.sol_lamports) for e in bar_events if e.side == "buy")
-            ls = sum(int(e.sol_lamports) for e in bar_events if e.side == "sell")
+            curr.sort(key=lambda e: (e.t, e.wallet, e.event_type))
+            occurs = len(curr) > 0
+            b = sum(1 for e in curr if e.side == KNOWN_BUY)
+            s = sum(1 for e in curr if e.side == KNOWN_SELL)
+            lb = sum(int(e.sol_lamports) for e in curr if e.side == KNOWN_BUY)
+            ls = sum(int(e.sol_lamports) for e in curr if e.side == KNOWN_SELL)
+
+            etimes = tuple(e.t for e in curr)
+            ewallets = tuple(e.wallet for e in curr)
+            esides = tuple(e.side for e in curr)
+            wdedup = tuple(sorted({e.wallet for e in curr}))
 
             if occurs:
-                first_ev_t = min(e.t for e in bar_events)
-                # previous event strictly before first event in this bar
-                # deterministic: scan back from all processed events in this bar
-                prev_before_bar = prev_event_t
-                if prev_before_bar is None:
-                    gap_ev = 10**9
-                else:
-                    gap_ev = max(0, first_ev_t - prev_before_bar)
-                gap_to_prev_for_event_bar.append(gap_ev)
-                prev_event_t = max(e.t for e in bar_events)
+                first_ev_t = etimes[0]
+                gap_ev = 10**9 if prev_event_t is None else max(0, first_ev_t - prev_event_t)
+                prev_event_t = etimes[-1]
                 last_event_t = prev_event_t
             else:
-                gap_to_prev_for_event_bar.append(0)
+                gap_ev = 0
 
             tsle = 10**9 if last_event_t is None else max(0, T - last_event_t)
 
             gm.append(mint)
             gt.append(T)
             event_occurs.append(occurs)
-            event_count_bar.append(len(bar_events))
+            event_count_bar.append(len(curr))
             buy_count_bar.append(b)
             sell_count_bar.append(s)
             lam_buy_bar.append(lb)
             lam_sell_bar.append(ls)
             time_since_last.append(tsle)
+            gap_to_prev_for_event_bar.append(gap_ev)
+            bar_wallets_dedup.append(wdedup)
+            bar_event_times.append(etimes)
+            bar_event_wallets.append(ewallets)
+            bar_event_sides.append(esides)
 
         mint_ranges[mint] = (start_ix, len(gt))
 
@@ -384,6 +409,10 @@ def build_grid_tape(tape: EventTape, grid_seconds: int) -> GridTape:
         lamports_sell_bar=lam_sell_bar,
         time_since_last_event=time_since_last,
         gap_to_prev_event_for_bar_event=gap_to_prev_for_event_bar,
+        bar_wallets_dedup=bar_wallets_dedup,
+        bar_event_times=bar_event_times,
+        bar_event_wallets=bar_event_wallets,
+        bar_event_sides=bar_event_sides,
         mint_ranges=mint_ranges,
     )
 
@@ -516,38 +545,68 @@ def rolling_sum(arr: List[int], times: List[int], W: int) -> List[int]:
 
 
 def rolling_observables(grid: GridTape, W: int) -> Dict[str, List[float]]:
+    """Exact rolling observables from real per-event timestamps and wallets.
+
+    - unique_whales_W: exact distinct wallets in (T-W, T]
+    - mean_interarrival_W: mean diffs of sorted true event timestamps in (T-W, T]
+    """
     uniq = [0] * grid.n
     mean_inter = [float(W)] * grid.n
     rate = [0.0] * grid.n
 
-    # derive wallet-level info from bar data approximation using event_count only
-    # unique proxy is cumulative distinct-event bars in window; deterministic, data-only
     for mint in sorted(grid.mint_ranges):
         s, e = grid.mint_ranges[mint]
-        times = grid.t[s:e]
-        cnt = grid.event_count_bar[s:e]
-        left = 0
-        window_events = 0
-        event_times: List[int] = []
-        for i in range(len(times)):
-            t = times[i]
-            while left <= i and times[left] <= t - W:
-                window_events -= cnt[left]
-                left += 1
-                # trim event_times by time
-                event_times = [x for x in event_times if x > t - W]
-            window_events += cnt[i]
-            if cnt[i] > 0:
-                event_times.extend([t] * cnt[i])
-            # proxy unique whales from event density in window
-            uniq[s + i] = max(0, int(round(math.sqrt(max(0, window_events)))))
-            span = max(1, t - times[left])
-            rate[s + i] = window_events / span
-            if len(event_times) >= 2:
-                dif = [event_times[k] - event_times[k - 1] for k in range(1, len(event_times))]
-                mean_inter[s + i] = sum(dif) / len(dif)
-            elif window_events > 0:
-                mean_inter[s + i] = float(W)
+        # exact rolling distinct wallet counter
+        ev_queue: Deque[Tuple[int, str]] = deque()
+        wallet_counter: Dict[str, int] = defaultdict(int)
+
+        # exact rolling time queue for interarrival and event rate
+        t_queue: Deque[int] = deque()
+        sum_diffs = 0.0  # sum of consecutive diffs inside t_queue
+
+        for gi in range(s, e):
+            T = grid.t[gi]
+
+            # add current bar events (all true event timestamps and wallet labels)
+            bt = grid.bar_event_times[gi]
+            bw = grid.bar_event_wallets[gi]
+            # these are already sorted by time at build stage
+            for k in range(len(bt)):
+                et = bt[k]
+                ew = bw[k]
+                ev_queue.append((et, ew))
+                wallet_counter[ew] += 1
+
+                if t_queue:
+                    sum_diffs += float(et - t_queue[-1])
+                t_queue.append(et)
+
+            # pop old events <= T-W to keep open-left interval (T-W, T]
+            cutoff = T - W
+            while ev_queue and ev_queue[0][0] <= cutoff:
+                old_t, old_w = ev_queue.popleft()
+                wallet_counter[old_w] -= 1
+                if wallet_counter[old_w] <= 0:
+                    del wallet_counter[old_w]
+
+            while t_queue and t_queue[0] <= cutoff:
+                if len(t_queue) >= 2:
+                    # remove edge between first and second
+                    second = t_queue[1]
+                    first = t_queue[0]
+                    sum_diffs -= float(second - first)
+                t_queue.popleft()
+
+            uniq[gi] = len(wallet_counter)
+            n_events = len(t_queue)
+            rate[gi] = float(n_events) / float(max(1, W))
+            if n_events >= 2:
+                mean_inter[gi] = sum_diffs / float(n_events - 1)
+            elif n_events == 1:
+                mean_inter[gi] = float(W)
+            else:
+                mean_inter[gi] = float(W)
+
     return {"unique": uniq, "mean_inter": mean_inter, "rate": rate}
 
 
@@ -661,7 +720,6 @@ def mine_acceleration(grid: GridTape, coord_w: int, coord_mask: List[bool]) -> T
 
 
 def mine_distribution(grid: GridTape, coord_w: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
-    # candidate windows from coord and episode proxy on event bars
     event_times = [grid.t[i] for i in range(grid.n) if grid.event_occurs[i]]
     lengths: List[int] = []
     if event_times:
@@ -675,6 +733,61 @@ def mine_distribution(grid: GridTape, coord_w: int) -> Tuple[Dict[str, Any], Dic
     med_ep = max(60, int(quantile(lengths, 0.50, 60.0)))
     q75_ep = max(60, int(quantile(lengths, 0.75, float(med_ep))))
     cand_w = unique_sorted_ints(max(1, min(120, x // 60)) for x in [coord_w, med_ep, (coord_w + med_ep) // 2, q75_ep])
+
+    # side-quality report from real side labels
+    total_events = 0
+    unknown_events = 0
+    per_mint_unknown_ratio: List[float] = []
+    for mint in sorted(grid.mint_ranges):
+        s, e = grid.mint_ranges[mint]
+        m_total = 0
+        m_unknown = 0
+        for i in range(s, e):
+            sides = grid.bar_event_sides[i]
+            m_total += len(sides)
+            for sd in sides:
+                if sd not in {KNOWN_BUY, KNOWN_SELL}:
+                    m_unknown += 1
+        if m_total > 0:
+            per_mint_unknown_ratio.append(m_unknown / m_total)
+        total_events += m_total
+        unknown_events += m_unknown
+
+    global_unknown_ratio = (unknown_events / total_events) if total_events > 0 else 1.0
+    unknown_threshold = quantile(per_mint_unknown_ratio, 0.75, 1.0)
+    side_unusable = total_events == 0 or global_unknown_ratio > unknown_threshold
+
+    if side_unusable:
+        # no guessing: distribution is disabled and reported
+        false_mask = [False] * grid.n
+        params = {
+            "NET_FLOW_WINDOW": int(cand_w[0] if cand_w else max(1, coord_w // 60)),
+            "SELL_DOM_THRESHOLD": 1.0,
+            "MIN_ACTIVITY_FOR_DISTRIBUTION": 10**9,
+        }
+        feats = {
+            "buy_count": [0] * grid.n,
+            "sell_count": [0] * grid.n,
+            "buy_lamports": [0] * grid.n,
+            "sell_lamports": [0] * grid.n,
+            "activity_count": [0] * grid.n,
+            "sell_ratio": [0.0] * grid.n,
+            "net_flow": [0] * grid.n,
+            "distribution_mask": false_mask,
+        }
+        report = {
+            "window_candidates_min": cand_w,
+            "selected": "disabled_due_to_side_unknown_ratio",
+            "num_candidates": 0,
+            "side_quality": {
+                "total_events": total_events,
+                "unknown_events": unknown_events,
+                "global_unknown_ratio": global_unknown_ratio,
+                "unknown_ratio_threshold_X": unknown_threshold,
+                "distribution_disabled": True,
+            },
+        }
+        return params, feats, report
 
     best = None
     best_key = None
@@ -720,17 +833,28 @@ def mine_distribution(grid: GridTape, coord_w: int) -> Tuple[Dict[str, Any], Dic
             "net_flow": net,
             "distribution_mask": mask,
         },
-        {"window_candidates_min": cand_w, "selected": best, "num_candidates": num},
+        {
+            "window_candidates_min": cand_w,
+            "selected": best,
+            "num_candidates": num,
+            "side_quality": {
+                "total_events": total_events,
+                "unknown_events": unknown_events,
+                "global_unknown_ratio": global_unknown_ratio,
+                "unknown_ratio_threshold_X": unknown_threshold,
+                "distribution_disabled": False,
+            },
+        },
     )
 
 
 def mine_expansion(grid: GridTape, coord_w: int) -> Tuple[Dict[str, Any], Dict[str, List[Any]], Dict[str, Any]]:
     W = max(30, coord_w)
+    # exact unique whales in W from real observables
+    obs = rolling_observables(grid, W)
+    growth = [float(x) for x in obs["unique"]]
     events_roll = rolling_sum(grid.event_count_bar, grid.t, W)
-    # deterministic diversity proxy from event bar frequency
-    active_bars_roll = rolling_sum([1 if x > 0 else 0 for x in grid.event_count_bar], grid.t, W)
-    growth = [float(max(0, int(round(math.sqrt(max(0, events_roll[i])))))) for i in range(grid.n)]
-    diversity = [float(active_bars_roll[i]) / max(1.0, float(events_roll[i])) for i in range(grid.n)]
+    diversity = [growth[i] / max(1.0, float(events_roll[i])) for i in range(grid.n)]
 
     gthr_c = sorted({quantile(growth, q, 2.0) for q in (0.60, 0.70, 0.80, 0.90) if quantile(growth, q, 2.0) >= 2.0}) or [2.0]
     dthr_c = sorted({quantile(diversity, q, 0.5) for q in (0.50, 0.60, 0.70, 0.80, 0.90) if quantile(diversity, q, 0.5) > 0}) or [0.5]
@@ -769,21 +893,14 @@ def assign_states(grid: GridTape, thresholds: Dict[str, Any], feats: Dict[str, L
     events_in_death = rolling_sum(grid.event_count_bar, grid.t, death_thr)
     events_in_coord = rolling_sum(grid.event_count_bar, grid.t, coord_w)
 
-    # Hard requirement: DEATH false at any grid time with an event
     death = [
         (events_in_death[i] == 0) and (grid.time_since_last_event[i] >= death_thr) and (not grid.event_occurs[i])
         for i in range(grid.n)
     ]
-
-    # ignition on first grid time where event occurs and prior silence >= ignition and not death
-    ignition = []
-    for i in range(grid.n):
-        cond = (
-            grid.event_occurs[i]
-            and grid.gap_to_prev_event_for_bar_event[i] >= ign_thr
-            and (not death[i])
-        )
-        ignition.append(cond)
+    ignition = [
+        grid.event_occurs[i] and (grid.gap_to_prev_event_for_bar_event[i] >= ign_thr) and (not death[i])
+        for i in range(grid.n)
+    ]
 
     coord = feats["coord_mask"]
     accel = feats["accel_mask"]
@@ -805,7 +922,6 @@ def assign_states(grid: GridTape, thresholds: Dict[str, Any], feats: Dict[str, L
         for i in range(grid.n)
     ]
 
-    # Sink: only when recent activity exists and no stronger state true
     base = [events_in_coord[i] > 0 for i in range(grid.n)]
 
     states = {
@@ -836,10 +952,7 @@ def overlap_counts(states: Dict[str, List[bool]]) -> Dict[Tuple[str, str], Tuple
     for a in STATE_ORDER:
         for b in STATE_ORDER:
             inc = sum(1 for i in range(len(states[a])) if states[a][i] and states[b][i])
-            if a == "TOKEN_BASE_ACTIVITY" or b == "TOKEN_BASE_ACTIVITY":
-                exc = 0
-            else:
-                exc = inc
+            exc = 0 if (a == "TOKEN_BASE_ACTIVITY" or b == "TOKEN_BASE_ACTIVITY") else inc
             out[(a, b)] = (inc, exc)
     return out
 
@@ -891,7 +1004,6 @@ def write_artifacts(outdir: Path, thresholds: Dict[str, Any], grid: GridTape, st
         for mint, tph, tc, n in tr:
             w.writerow([mint, f"{tph:.8f}", tc, n])
 
-    # collisions use excluding-base metric semantics
     with (outdir / "top_collision_examples.jsonl").open("w", encoding="utf-8") as f:
         num = 0
         for i in range(grid.n):
@@ -953,7 +1065,6 @@ def run_once(db: Path, outdir: Path, grid_seconds: int) -> Dict[str, str]:
 
         states, final = assign_states(grid, thresholds, feats)
 
-        # ensure ignition appears when historical data has eligible gaps
         ign_count = sum(1 for s in final if s == "TOKEN_IGNITION")
         if ign_count == 0:
             eligible = [g for g in gaps if g < thresholds["DEATH_SILENCE_THRESHOLD"]]
