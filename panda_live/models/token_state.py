@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from ..config.thresholds import REPLACEMENT_LOOKBACK_SECONDS, SILENT_G_MIN_SECONDS
+from .events import WaveRecord
 from .wallet_state import WalletState
 
 
@@ -27,6 +28,15 @@ class TokenState:
 
     active_wallets: Dict[str, WalletState] = field(default_factory=dict)
     early_wallets: Set[str] = field(default_factory=set)
+
+    # WAVE TRACKING
+    current_wave: int = 1
+    wave_start_time: int = 0
+    wave_early_wallets: Set[str] = field(default_factory=set)
+    wave_history: List[WaveRecord] = field(default_factory=list)
+
+    # Exhaustion signal dedup
+    last_exhaustion_signaled_pct: float = 0.0
 
     last_whale_timestamp: Optional[int] = None
     prev_whale_timestamp: Optional[int] = None  # For reignition gap calculation

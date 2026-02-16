@@ -52,6 +52,13 @@ class EpisodeTracker:
         token_state.episode_max_density = 0.0
         token_state.whale_events_2min.clear()
 
+        # Reset wave tracking for new episode
+        token_state.current_wave = 1
+        token_state.wave_start_time = current_time
+        token_state.wave_early_wallets = set()
+        token_state.wave_history = []
+        token_state.last_exhaustion_signaled_pct = 0.0
+
     def check_reignition(
         self,
         token_state: TokenState,

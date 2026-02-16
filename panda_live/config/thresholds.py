@@ -22,6 +22,10 @@ PERSISTENCE_MAX_GAP: int = 300  # 5 minutes
 # Exhaustion
 EXHAUSTION_SILENCE_THRESHOLD: int = 180  # 3 minutes
 EXHAUSTION_EARLY_WALLET_PERCENT: float = 0.60  # 60%
+EXHAUSTION_SIGNAL_STEP: float = 0.10  # 10% step for dedup
+
+# Wave transition
+WAVE_REVERSAL_MIN_NEW_WHALES: int = 3  # Min new whale wallets to trigger wave transition
 
 # Episode tracking
 EPISODE_END_SILENCE: int = 600  # 10 minutes

@@ -45,19 +45,22 @@ class SignalAggregator:
 
         # 1. TIMING (only check once per wallet)
         if not wallet_state.timing_checked:
-            is_early = self.detector.detect_timing(wallet_state, token_state)
-            if is_early:
-                signals.append("TIMING")
+            is_new_signal, timing_type = self.detector.detect_timing(wallet_state, token_state)
+            if is_new_signal:
+                is_early = (timing_type == "EARLY")
                 delta = (
-                    wallet_state.first_seen - token_state.t0
-                    if token_state.t0 is not None
+                    wallet_state.first_seen - token_state.wave_start_time
+                    if token_state.wave_start_time is not None
                     else 0
                 )
+                signals.append("TIMING")
                 details["timing"] = {
-                    "is_early": True,
+                    "is_early": is_early,
                     "delta_seconds": delta,
                 }
-                token_state.early_wallets.add(wallet_state.address)
+                if is_early:
+                    token_state.wave_early_wallets.add(wallet_state.address)
+                    token_state.early_wallets.add(wallet_state.address)
             wallet_state.timing_checked = True
 
         # 2. COORDINATION

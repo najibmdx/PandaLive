@@ -152,6 +152,8 @@ class LiveProcessor:
         # Set token birth time (first observed swap)
         if self.token_state.t0 is None:
             self.token_state.t0 = current_time
+            if self.token_state.wave_start_time == 0:
+                self.token_state.wave_start_time = current_time
 
         # Get or create wallet state (with LRU eviction at cap)
         wallet = flow.wallet

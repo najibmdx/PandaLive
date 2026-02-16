@@ -14,6 +14,7 @@ from ..config.thresholds import (
     COORDINATION_TIME_WINDOW,
     EARLY_WINDOW,
     EXHAUSTION_EARLY_WALLET_PERCENT,
+    EXHAUSTION_SIGNAL_STEP,
     EXHAUSTION_SILENCE_THRESHOLD,
     PERSISTENCE_MAX_GAP,
     PERSISTENCE_MIN_APPEARANCES,
@@ -33,23 +34,31 @@ class WalletSignalDetector:
         self,
         wallet_state: WalletState,
         token_state: TokenState,
-    ) -> bool:
-        """Detect if wallet appeared early (within EARLY_WINDOW of token birth).
+    ) -> Tuple[bool, str]:
+        """Detect if wallet appeared early (within EARLY_WINDOW of token/wave birth).
 
         Sets wallet_state.is_early as a side effect.
 
         Returns:
-            True if early, False otherwise.
+            (is_new_signal, timing_type) where timing_type is "EARLY" or "LATE".
         """
         if token_state.t0 is None:
             # Mid-flight start: first wallet is early by definition
             wallet_state.is_early = True
-            return True
+            token_state.early_wallets.add(wallet_state.address)
+            token_state.wave_early_wallets.add(wallet_state.address)
+            return True, "EARLY"
 
-        delta = wallet_state.first_seen - token_state.t0
+        ref_time = token_state.wave_start_time if token_state.wave_start_time else token_state.t0
+        delta = wallet_state.first_seen - ref_time
         is_early = delta <= EARLY_WINDOW
         wallet_state.is_early = is_early
-        return is_early
+
+        if is_early:
+            token_state.early_wallets.add(wallet_state.address)
+            token_state.wave_early_wallets.add(wallet_state.address)
+
+        return True, "EARLY" if is_early else "LATE"
 
     def detect_coordination(
         self,
@@ -103,38 +112,49 @@ class WalletSignalDetector:
         Returns:
             (is_exhausted, details_dict with breakdown context)
         """
-        early_wallets = token_state.early_wallets
+        wave_early = token_state.wave_early_wallets
 
-        if len(early_wallets) == 0:
+        if len(wave_early) == 0:
             return False, {}
 
         # Count silent early wallets (no activity for EXHAUSTION_SILENCE_THRESHOLD)
         silent_early: List[str] = []
-        for wallet_addr in early_wallets:
+        for wallet_addr in wave_early:
             wallet_state = token_state.active_wallets.get(wallet_addr)
             if wallet_state:
                 silence_duration = current_time - wallet_state.last_seen
                 if silence_duration >= EXHAUSTION_SILENCE_THRESHOLD:
                     silent_early.append(wallet_addr)
 
-        disengagement_pct = len(silent_early) / len(early_wallets)
+        disengagement_pct = len(silent_early) / len(wave_early)
 
         if disengagement_pct < EXHAUSTION_EARLY_WALLET_PERCENT:
+            return False, {}
+
+        # Dedup: only signal at each 10% step
+        should_signal = False
+        if token_state.last_exhaustion_signaled_pct == 0.0:
+            should_signal = True  # First time crossing 60%
+        elif disengagement_pct >= token_state.last_exhaustion_signaled_pct + EXHAUSTION_SIGNAL_STEP:
+            should_signal = True  # Crossed next 10% step
+
+        if not should_signal:
             return False, {}
 
         # Check for replacement whales (non-early wallets active in last 5min)
         lookback = 300
         replacement_count = 0
         for wallet_addr, wallet_state in token_state.active_wallets.items():
-            if wallet_addr not in early_wallets:
+            if wallet_addr not in wave_early:
                 if (current_time - wallet_state.last_seen) < lookback:
                     replacement_count += 1
 
         if replacement_count == 0:
+            token_state.last_exhaustion_signaled_pct = disengagement_pct
             return True, {
                 "disengagement_pct": round(disengagement_pct, 2),
                 "silent_early_count": len(silent_early),
-                "total_early_count": len(early_wallets),
+                "total_early_count": len(wave_early),
                 "replacement_count": 0,
             }
 

@@ -39,3 +39,6 @@ class WalletState:
 
     # Signal detection state
     timing_checked: bool = False
+
+    # Wave tracking
+    wave_id_at_entry: int = 1

@@ -19,6 +19,7 @@ from typing import Optional
 from ..config.thresholds import (
     DISSIPATION_WHALE_THRESHOLD,
     PRESSURE_PEAKING_MIN_WHALES,
+    WAVE_REVERSAL_MIN_NEW_WHALES,
 )
 from ..core.density_tracker import DensityTracker
 from ..core.episode_tracker import EpisodeTracker
@@ -193,17 +194,20 @@ class TokenStateMachine:
 
         # --- REVERSE TRANSITIONS ---
 
-        # EXHAUSTION -> PARTICIPATION_EXPANSION (new whale burst)
+        # EXHAUSTION -> PARTICIPATION_EXPANSION (wave transition)
         if current == "TOKEN_EXHAUSTION_DETECTED":
-            recent_whales = self._count_recent_whales(
-                token_state, current_time, lookback=60
-            )
-            if recent_whales >= 2:
+            new_wave_wallets = self._count_new_wave_wallets(token_state, current_time)
+            if new_wave_wallets >= WAVE_REVERSAL_MIN_NEW_WHALES:
+                # Wave transition — archive current wave, start new one
+                self._start_new_wave(token_state, current_time)
                 return self._transition(
                     token_state,
                     "TOKEN_PARTICIPATION_EXPANSION",
-                    "new_whale_burst_reversal",
-                    {"new_whale_count": recent_whales},
+                    "wave_transition",
+                    {
+                        "new_wave_id": token_state.current_wave,
+                        "new_whale_count": new_wave_wallets,
+                    },
                     current_time,
                 )
 
@@ -257,6 +261,61 @@ class TokenStateMachine:
             event.details["severity"] = severity
 
         return event
+
+    def _count_new_wave_wallets(self, token_state: TokenState, current_time: int) -> int:
+        """Count whale wallets active in last 60s NOT in current wave's early cohort."""
+        recent_whale_wallets = {
+            addr for addr, ws in token_state.active_wallets.items()
+            if (current_time - ws.last_seen) < 60
+        }
+        new_wallets = recent_whale_wallets - token_state.wave_early_wallets
+        return len(new_wallets)
+
+    def _start_new_wave(self, token_state: TokenState, current_time: int) -> None:
+        """Archive current wave and start a new one."""
+        from panda_live.models.events import WaveRecord
+
+        # Archive exhausted wave
+        token_state.wave_history.append(WaveRecord(
+            wave_id=token_state.current_wave,
+            start_time=token_state.wave_start_time,
+            end_time=current_time,
+            early_wallet_count=len(token_state.wave_early_wallets),
+            peak_disengagement=self._get_current_disengagement(token_state),
+        ))
+
+        # Increment wave
+        token_state.current_wave += 1
+        token_state.wave_start_time = current_time
+
+        # Reset wave-level early cohort
+        token_state.wave_early_wallets = set()
+
+        # Reset exhaustion signal dedup state
+        token_state.last_exhaustion_signaled_pct = 0.0
+
+        # Reset density for new wave's PRESSURE_PEAKING detection
+        token_state.episode_max_density = 0.0
+
+        # Reset all wallet flags for fresh wave detection
+        for ws in token_state.active_wallets.values():
+            ws.is_silent = False if hasattr(ws, 'is_silent') else False
+            ws.silent_pattern = "" if hasattr(ws, 'silent_pattern') else ""
+            ws.silent_since = 0 if hasattr(ws, 'silent_since') else 0
+            ws.timing_checked = False  # Allow re-classification for new wave
+
+    def _get_current_disengagement(self, token_state: TokenState) -> float:
+        """Get current wave disengagement percentage."""
+        wave_early = token_state.wave_early_wallets
+        if not wave_early:
+            return 0.0
+        silent = sum(
+            1 for addr in wave_early
+            if addr in token_state.active_wallets
+            and token_state.active_wallets[addr].is_early
+            and (token_state.chain_now or 0) - token_state.active_wallets[addr].last_seen >= 180
+        )
+        return silent / len(wave_early)
 
     def _count_coordinated_wallets(self, token_state: TokenState) -> int:
         """Count early wallets (proxy for coordination in current episode)."""

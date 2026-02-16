@@ -86,7 +86,7 @@ class TokenPanel:
             sev = recent_transitions[0].details.get("severity")
             if sev:
                 severity = f" [{sev}]"
-        lines.append(f" TOKEN: {mint_short} | EP: {token_state.episode_id} | STATE: {state_name}{severity}")
+        lines.append(f" TOKEN: {mint_short} | EP: {token_state.episode_id} W:{token_state.current_wave} | STATE: {state_name}{severity}")
 
         # Line 2: Phase
         phase = _STATE_TO_PHASE.get(token_state.current_state, "")
