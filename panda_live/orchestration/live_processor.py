@@ -189,9 +189,21 @@ class LiveProcessor:
         # Log flow (FULL mode only)
         self.session_logger.log_flow(flow)
 
-        # Process each whale event through Phase 2 + 3
+        # ALL whale events → logging + density (every threshold crossing matters)
         for whale_event in whale_events:
-            self._process_whale_event(whale_event, ws, current_time)
+            self.session_logger.log_whale_event(whale_event)
+            self.state_machine.density_tracker.add_whale_event(
+                self.token_state, whale_event.wallet, whale_event.timestamp
+            )
+
+        # Signal detection → ONCE per wallet per flow (first event carries the wallet context)
+        if whale_events:
+            signal_event = self.signal_aggregator.process_whale_event(
+                whale_events[0], ws, self.token_state, current_time
+            )
+            if signal_event.signals:
+                self.session_logger.log_wallet_signal(signal_event)
+                self.renderer.add_wallet_signal(signal_event)
         
         # EVENT-DRIVEN PATTERN DETECTION
         # EVENT TRIGGER 1: Wallet just traded (update activity metrics)
@@ -224,26 +236,6 @@ class LiveProcessor:
             self.session_logger.log_state_transition(transition)
             self.renderer.add_transition(transition)
 
-    def _process_whale_event(
-        self, whale_event: WhaleEvent, ws: WalletState, current_time: int
-    ) -> None:
-        """Process a whale event through Phase 2 signals and density tracking."""
-        # Log whale event (FULL mode only)
-        self.session_logger.log_whale_event(whale_event)
-
-        # Update density tracking
-        self.state_machine.density_tracker.add_whale_event(
-            self.token_state, whale_event.wallet, whale_event.timestamp
-        )
-
-        # Phase 2: Detect wallet signals
-        signal_event = self.signal_aggregator.process_whale_event(
-            whale_event, ws, self.token_state, current_time
-        )
-
-        if signal_event.signals:
-            self.session_logger.log_wallet_signal(signal_event)
-            self.renderer.add_wallet_signal(signal_event)
 
     def _should_refresh(self) -> bool:
         """Check if enough time has elapsed for a display refresh."""
