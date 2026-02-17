@@ -43,22 +43,15 @@ class SignalAggregator:
         signals: List[str] = []
         details: dict = {}
 
-        # 1. TIMING (only check once per wallet)
-        if not wallet_state.timing_checked:
-            is_early = self.detector.detect_timing(wallet_state, token_state)
-            if is_early:
-                signals.append("TIMING")
-                delta = (
-                    wallet_state.first_seen - token_state.t0
-                    if token_state.t0 is not None
-                    else 0
-                )
-                details["timing"] = {
-                    "is_early": True,
-                    "delta_seconds": delta,
-                }
-                token_state.early_wallets.add(wallet_state.address)
-            wallet_state.timing_checked = True
+        # 1. TIMING (only check once per wallet — detect_timing handles latch)
+        is_new_signal, timing_type = self.detector.detect_timing(wallet_state, token_state)
+        if is_new_signal:
+            ref_time = token_state.wave_start_time or token_state.t0 or 0
+            signals.append("TIMING")
+            details["timing"] = {
+                "is_early": timing_type == "EARLY",
+                "delta_seconds": wallet_state.first_seen - ref_time,
+            }
 
         # 2. COORDINATION
         is_coord, coordinated_wallets = self.detector.detect_coordination(
@@ -74,11 +67,11 @@ class SignalAggregator:
             }
 
         # 3. PERSISTENCE
-        is_persistent = self.detector.detect_persistence(wallet_state)
+        is_persistent, distinct_minutes = self.detector.detect_persistence(wallet_state)
         if is_persistent:
             signals.append("PERSISTENCE")
             details["persistence"] = {
-                "appearances": len(wallet_state.minute_buckets),
+                "appearances": distinct_minutes,
                 "buckets": sorted(wallet_state.minute_buckets),
             }
 
