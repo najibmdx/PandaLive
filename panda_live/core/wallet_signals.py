@@ -114,6 +114,41 @@ class WalletSignalDetector:
         is_persistent = max_gap <= PERSISTENCE_MAX_GAP
         return is_persistent, distinct_minutes
 
+    def is_wave_exhausted(
+        self,
+        token_state: "TokenState",
+        current_time: int,
+    ) -> Tuple[bool, Dict]:
+        """Raw exhaustion check for state machine — no dedup, no replacement gate.
+
+        Pure question: Is 60%+ of current wave's early cohort silent?
+        Uses event-driven is_silent flags (set by EventDrivenPatternDetector).
+
+        Returns:
+            (is_exhausted, details_dict)
+        """
+        wave_early = token_state.wave_early_wallets
+
+        if len(wave_early) == 0:
+            return False, {}
+
+        silent_early = []
+        for wallet_addr in wave_early:
+            wallet_state = token_state.active_wallets.get(wallet_addr)
+            if wallet_state and wallet_state.is_silent:
+                silent_early.append(wallet_addr)
+
+        disengagement_pct = len(silent_early) / len(wave_early)
+
+        if disengagement_pct < EXHAUSTION_EARLY_WALLET_PERCENT:
+            return False, {}
+
+        return True, {
+            "disengagement_pct": round(disengagement_pct, 2),
+            "silent_early_count": len(silent_early),
+            "total_early_count": len(wave_early),
+        }
+
     def detect_exhaustion(
         self,
         token_state: TokenState,

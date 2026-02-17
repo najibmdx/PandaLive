@@ -165,17 +165,17 @@ class TokenStateMachine:
                         current_time,
                     )
 
-        # PRESSURE_PEAKING -> EXHAUSTION_DETECTED (60% early silent, no replacement)
+        # PRESSURE_PEAKING -> EXHAUSTION_DETECTED (60%+ wave early silent)
         if current == "TOKEN_PRESSURE_PEAKING":
-            exhaustion_event = signal_aggregator.check_exhaustion(
+            is_exhausted, exhaust_details = signal_aggregator.check_wave_exhaustion(
                 token_state, current_time
             )
-            if exhaustion_event is not None:
+            if is_exhausted:
                 return self._transition(
                     token_state,
                     "TOKEN_EXHAUSTION_DETECTED",
-                    "60%_early_silent_no_replacement",
-                    exhaustion_event.details.get("exhaustion", {}),
+                    "wave_exhaustion",
+                    exhaust_details,
                     current_time,
                 )
 
