@@ -44,6 +44,16 @@ class WhaleEvent:
 
 
 @dataclass
+class WaveRecord:
+    """Archived summary of a completed wave."""
+    wave_id: int
+    start_time: int
+    end_time: int
+    early_wallet_count: int
+    peak_disengagement: float
+
+
+@dataclass
 class StateTransitionEvent:
     """Token state transition event.
 

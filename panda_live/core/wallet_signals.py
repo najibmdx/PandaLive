@@ -14,6 +14,7 @@ from ..config.thresholds import (
     COORDINATION_TIME_WINDOW,
     EARLY_WINDOW,
     EXHAUSTION_EARLY_WALLET_PERCENT,
+    EXHAUSTION_SIGNAL_STEP,
     PERSISTENCE_MAX_GAP,
     PERSISTENCE_MIN_APPEARANCES,
 )
@@ -48,13 +49,15 @@ class WalletSignalDetector:
         if token_state.t0 is None:
             return False, ""
 
-        is_early = (wallet_state.first_seen - token_state.t0) <= EARLY_WINDOW
+        ref_time = token_state.wave_start_time if token_state.wave_start_time else token_state.t0
+        is_early = (wallet_state.first_seen - ref_time) <= EARLY_WINDOW
 
         wallet_state.timing_checked = True
         wallet_state.is_early = is_early
 
         if is_early:
             token_state.early_wallets.add(wallet_state.address)
+            token_state.wave_early_wallets.add(wallet_state.address)
 
         return True, "EARLY" if is_early else "LATE"
 
@@ -115,36 +118,44 @@ class WalletSignalDetector:
         token_state: TokenState,
         current_time: int,
     ) -> Tuple[bool, Dict]:
-        """Detect if 60%+ early wallets are silent (EVENT-DRIVEN).
-        
+        """Detect if 60%+ wave early wallets are silent (EVENT-DRIVEN).
+
         Uses is_silent flags set by EventDrivenPatternDetector.
-        No time-based checks - detection happened on events.
+        Wave-scoped: checks wave_early_wallets, not episode-level early_wallets.
+        Dedup: only signals at first crossing and each +10% step.
         REMOVED: Replacement whale check (design decision).
 
         Returns:
             (is_exhausted, details_dict with breakdown context)
         """
-        early_wallets = token_state.early_wallets
-
-        if len(early_wallets) == 0:
+        if len(token_state.wave_early_wallets) == 0:
             return False, {}
 
-        # Count silent early wallets (using event-driven is_silent flag)
+        # Count silent wave-early wallets (using event-driven is_silent flag)
         silent_early: List[str] = []
-        for wallet_addr in early_wallets:
+        for wallet_addr in token_state.wave_early_wallets:
             wallet_state = token_state.active_wallets.get(wallet_addr)
             if wallet_state and wallet_state.is_silent:  # EVENT-DRIVEN!
                 silent_early.append(wallet_addr)
 
-        disengagement_pct = len(silent_early) / len(early_wallets)
+        disengagement_pct = len(silent_early) / len(token_state.wave_early_wallets)
 
-        # EXHAUSTION = 60%+ early wallets silent (period)
+        # EXHAUSTION = 60%+ wave early wallets silent (period)
         # No replacement check - late buyers are exit liquidity
         if disengagement_pct >= EXHAUSTION_EARLY_WALLET_PERCENT:
-            return True, {
-                "disengagement_pct": round(disengagement_pct, 2),
-                "silent_early_count": len(silent_early),
-                "total_early_count": len(early_wallets),
-            }
+            # Dedup: only signal at first crossing or each +10% step
+            should_signal = False
+            if token_state.last_exhaustion_signaled_pct == 0.0:
+                should_signal = True  # First time crossing 60%
+            elif disengagement_pct >= token_state.last_exhaustion_signaled_pct + EXHAUSTION_SIGNAL_STEP:
+                should_signal = True  # Crossed next 10% step
+
+            if should_signal:
+                token_state.last_exhaustion_signaled_pct = disengagement_pct
+                return True, {
+                    "disengagement_pct": round(disengagement_pct, 2),
+                    "silent_early_count": len(silent_early),
+                    "total_early_count": len(token_state.wave_early_wallets),
+                }
 
         return False, {}

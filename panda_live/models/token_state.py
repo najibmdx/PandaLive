@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 # No longer importing SILENT_G_MIN_SECONDS or REPLACEMENT_LOOKBACK_SECONDS
 # Silent detection now uses event-driven patterns (EventDrivenPatternDetector)
+from .events import WaveRecord
 from .wallet_state import WalletState
 
 
@@ -34,6 +35,15 @@ class TokenState:
 
     # Chain-aligned "now" (updated by LiveProcessor before render)
     chain_now: Optional[int] = None
+
+    # WAVE TRACKING
+    current_wave: int = 1
+    wave_start_time: int = 0
+    wave_early_wallets: Set[str] = field(default_factory=set)
+    wave_history: List = field(default_factory=list)  # List[WaveRecord]
+
+    # Exhaustion signal dedup
+    last_exhaustion_signaled_pct: float = 0.0
 
     # Density tracking: list of (timestamp, wallet_address) tuples
     whale_events_2min: List[Tuple[int, str]] = field(default_factory=list)

@@ -39,6 +39,7 @@ class WalletState:
 
     # Signal detection state
     timing_checked: bool = False
+    wave_id_at_entry: int = 1
     
     # EVENT-DRIVEN PATTERN DETECTION (data-driven from 7GB database)
     # Silent detection based on cohort comparison and behavioral patterns
