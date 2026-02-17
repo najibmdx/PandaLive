@@ -4,7 +4,7 @@ Processes whale events through all signal detectors and emits
 WalletSignalEvent objects with structured context.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ..config.thresholds import COORDINATION_SAMPLE_WALLETS
 from ..models.events import WhaleEvent, WalletSignalEvent
@@ -82,6 +82,18 @@ class SignalAggregator:
             signals=signals,
             details=details,
         )
+
+    def check_wave_exhaustion(
+        self,
+        token_state: TokenState,
+        current_time: int,
+    ) -> Tuple[bool, dict]:
+        """Check raw wave exhaustion for state machine — no dedup, no gates.
+
+        Returns:
+            (is_exhausted, details_dict)
+        """
+        return self.detector.is_wave_exhausted(token_state, current_time)
 
     def check_exhaustion(
         self,
