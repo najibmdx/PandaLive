@@ -1,0 +1,41 @@
+PATCH INSTRUCTIONS FOR whale_detection.py
+==========================================
+
+FIND the __init__ method (around line 20-35):
+
+OLD CODE:
+---------
+def __init__(self) -> None:
+    """Initialize with locked whale thresholds."""
+    from ..config.thresholds import (
+        WHALE_SINGLE_TX_SOL,
+        WHALE_CUM_5MIN_SOL,
+        WHALE_CUM_15MIN_SOL,
+    )
+    
+    self.whale_single_tx_sol = WHALE_SINGLE_TX_SOL
+    self.whale_cum_5min_sol = WHALE_CUM_5MIN_SOL
+    self.whale_cum_15min_sol = WHALE_CUM_15MIN_SOL
+
+
+REPLACE WITH:
+-------------
+def __init__(self, thresholds=None) -> None:
+    """Initialize with dynamic thresholds.
+    
+    Args:
+        thresholds: DynamicThresholds object. If None, uses default (50 SOL liquidity).
+    """
+    if thresholds is None:
+        from ..config.dynamic_thresholds import calculate_thresholds, DEFAULT_LIQUIDITY_SOL
+        thresholds = calculate_thresholds(DEFAULT_LIQUIDITY_SOL)
+    
+    # Use dynamic thresholds
+    self.thresholds = thresholds
+    self.whale_single_tx_sol = thresholds.whale_single_tx_sol
+    self.whale_cum_5min_sol = thresholds.whale_cum_5min_sol
+    self.whale_cum_15min_sol = thresholds.whale_cum_15min_sol
+
+
+THAT'S THE ONLY CHANGE NEEDED!
+The rest of the file uses self.whale_single_tx_sol etc, so it works automatically.

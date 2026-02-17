@@ -1,0 +1,4 @@
+{"event_type":"SESSION_START","timestamp":1770544499,"token_ca":"3SRnS2pdPhBh67v1bR3z4N28NkyzkLnYib2zR37epump","config":{"token_ca":"3SRnS2pdPhBh67v1bR3z4N28NkyzkLnYib2zR37epump","refresh_rate":5.0,"mode":"live"}}
+{"event_type":"WALLET_SIGNAL","timestamp":1770544272,"token_ca":"3SRnS2pdPhBh67v1bR3z4N28NkyzkLnYib2zR37epump","wallet":"2hKKB8V9otdYuUrLvDJPjR186tsvhzGuMqk7peyz6B83","signals":["TIMING"],"details":{"timing":{"is_early":true,"delta_seconds":-215}}}
+{"event_type":"STATE_TRANSITION","timestamp":1770544272,"token_ca":"3SRnS2pdPhBh67v1bR3z4N28NkyzkLnYib2zR37epump","episode_id":1,"from_state":"TOKEN_QUIET","to_state":"TOKEN_IGNITION","trigger":"new_episode","details":{"severity":"S1"}}
+{"event_type":"SESSION_END","timestamp":1770544894,"reason":"user_shutdown"}

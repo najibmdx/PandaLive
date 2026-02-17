@@ -1,0 +1,117 @@
+{
+  "acceleration": {
+    "long_candidates": [
+      11,
+      15,
+      20,
+      30
+    ],
+    "num_candidates": 8,
+    "selected": {
+      "activation": 0.0004980862301797638,
+      "flicker": 0.052483079007301696,
+      "rthr": 1.2,
+      "wl": 11,
+      "ws": 5
+    },
+    "short_candidates": [
+      5,
+      6
+    ]
+  },
+  "coordination": {
+    "activation_band": [
+      0.001147329645186809,
+      0.0012012667904335481
+    ],
+    "candidate_windows": [
+      10,
+      11,
+      214,
+      600
+    ],
+    "num_candidates": 4,
+    "selected": {
+      "W": 10,
+      "activation": 0.0011293505967712293,
+      "collisions": 0.0,
+      "flicker": 0.11792691837921143,
+      "ithr": 10,
+      "uthr": 1
+    }
+  },
+  "distribution": {
+    "num_candidates": 20,
+    "selected": {
+      "activation": 0.0,
+      "athr": 1263,
+      "flicker": 0.0,
+      "sthr": 0.5220125786163522,
+      "wmin": 1
+    },
+    "side_quality": {
+      "distribution_disabled": false,
+      "global_unknown_ratio": 0.0,
+      "total_events": 3211,
+      "unknown_events": 0,
+      "unknown_ratio_threshold_X": 0.0
+    },
+    "window_candidates_min": [
+      1
+    ]
+  },
+  "expansion": {
+    "num_candidates": 1,
+    "selected": {
+      "activation": 0.0,
+      "dt": 0.5,
+      "flicker": 0.0,
+      "gt": 2.0
+    },
+    "window_seconds": 30
+  },
+  "grid_seconds": 60,
+  "schema_tables": [
+    "cluster_runs",
+    "cohort_members",
+    "cohorts",
+    "files",
+    "phase2_runs",
+    "phase4_cluster_runs",
+    "phase4_edge_runs",
+    "phase4_features_norm",
+    "phase4_pattern_stats",
+    "phase4_patterns",
+    "phase4_runs",
+    "recycling_flags",
+    "spl_transfers",
+    "spl_transfers_v2",
+    "swaps",
+    "tx",
+    "wallet_clusters",
+    "wallet_edges",
+    "wallet_features",
+    "wallet_token_flow",
+    "wallets",
+    "whale_events",
+    "whale_states",
+    "whale_transitions"
+  ],
+  "silence": {
+    "DEATH_SILENCE_THRESHOLD": 1106,
+    "IGNITION_SILENCE_THRESHOLD": 10,
+    "active_mean_log": 2.3384583499413254,
+    "gap_count": 2676,
+    "inactive_mean_log": 7.965584481435824,
+    "method": "kmeans2_log_gap_valley_for_ignition_and_inactive_anchor_for_death",
+    "separation": 5.627126131494499
+  },
+  "source": {
+    "fallback_report": {
+      "derived_whale_lamports_threshold": 15025005000,
+      "fallback_reason": "whale_events truly missing; derived whale threshold from swaps lamports P99",
+      "source": "swaps (fallback)"
+    },
+    "source": "swaps (fallback)"
+  }
+}

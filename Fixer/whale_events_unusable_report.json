@@ -1,0 +1,8 @@
+{
+  "counts": {},
+  "reasons": [
+    "missing mint column"
+  ],
+  "table": "whale_events",
+  "usable": false
+}

@@ -1,0 +1,17 @@
+{"event_type": "SESSION_START", "timestamp": 1770349061, "token_ca": "BxK7test3mF9", "config": {"whale_single_tx": 10.0, "whale_cum_5min": 25.0, "whale_cum_15min": 50.0}}
+{"event_type": "FLOW", "timestamp": 1770349061, "wallet": "wallet1", "direction": "buy", "amount_sol": 12.5, "signature": "sig1", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_TX", "timestamp": 1770349061, "wallet": "wallet1", "amount_sol": 12.5, "threshold": 10.0, "signature": "sig1", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349071, "wallet": "wallet2", "direction": "buy", "amount_sol": 8.0, "signature": "sig2a", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349121, "wallet": "wallet2", "direction": "buy", "amount_sol": 9.0, "signature": "sig2b", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349181, "wallet": "wallet2", "direction": "buy", "amount_sol": 10.0, "signature": "sig2c", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_TX", "timestamp": 1770349181, "wallet": "wallet2", "amount_sol": 10.0, "threshold": 10.0, "signature": "sig2c", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_CUM_5M", "timestamp": 1770349181, "wallet": "wallet2", "amount_sol": 27.0, "threshold": 25.0, "signature": "sig2c", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349091, "wallet": "wallet3", "direction": "buy", "amount_sol": 15.0, "signature": "sig3a", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_TX", "timestamp": 1770349091, "wallet": "wallet3", "amount_sol": 15.0, "threshold": 10.0, "signature": "sig3a", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349241, "wallet": "wallet3", "direction": "buy", "amount_sol": 18.0, "signature": "sig3b", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_CUM_5M", "timestamp": 1770349241, "wallet": "wallet3", "amount_sol": 33.0, "threshold": 25.0, "signature": "sig3b", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349421, "wallet": "wallet3", "direction": "buy", "amount_sol": 20.0, "signature": "sig3c", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_CUM_15M", "timestamp": 1770349421, "wallet": "wallet3", "amount_sol": 53.0, "threshold": 50.0, "signature": "sig3c", "token_ca": "BxK7test3mF9"}
+{"event_type": "FLOW", "timestamp": 1770349261, "wallet": "wallet1", "direction": "buy", "amount_sol": 15.0, "signature": "sig1b", "token_ca": "BxK7test3mF9"}
+{"event_type": "WHALE_CUM_5M", "timestamp": 1770349261, "wallet": "wallet1", "amount_sol": 27.5, "threshold": 25.0, "signature": "sig1b", "token_ca": "BxK7test3mF9"}
+{"event_type": "SESSION_END", "timestamp": 1770349061, "token_ca": "BxK7test3mF9", "reason": "test_complete", "final_state": "TOKEN_QUIET", "episode_id": 0}

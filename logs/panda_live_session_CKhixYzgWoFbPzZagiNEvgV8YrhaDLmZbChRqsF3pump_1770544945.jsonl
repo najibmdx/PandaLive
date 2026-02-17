@@ -1,0 +1,5 @@
+{"event_type":"SESSION_START","timestamp":1770544946,"token_ca":"CKhixYzgWoFbPzZagiNEvgV8YrhaDLmZbChRqsF3pump","config":{"token_ca":"CKhixYzgWoFbPzZagiNEvgV8YrhaDLmZbChRqsF3pump","refresh_rate":5.0,"mode":"live"}}
+{"event_type":"WALLET_SIGNAL","timestamp":1770544299,"token_ca":"CKhixYzgWoFbPzZagiNEvgV8YrhaDLmZbChRqsF3pump","wallet":"JBf9VYunK4re9wieh2cGYLHTtKK7Tn5HwDu7z1Wvt97N","signals":["TIMING"],"details":{"timing":{"is_early":true,"delta_seconds":-635}}}
+{"event_type":"STATE_TRANSITION","timestamp":1770544299,"token_ca":"CKhixYzgWoFbPzZagiNEvgV8YrhaDLmZbChRqsF3pump","episode_id":1,"from_state":"TOKEN_QUIET","to_state":"TOKEN_IGNITION","trigger":"new_episode","details":{"severity":"S1"}}
+{"event_type":"WALLET_SIGNAL","timestamp":1770544144,"token_ca":"CKhixYzgWoFbPzZagiNEvgV8YrhaDLmZbChRqsF3pump","wallet":"GG6CnDBfBgKborH8QpS6YmAGBzKThvWV7gq7UYNxyEaP","signals":["TIMING"],"details":{"timing":{"is_early":true,"delta_seconds":-790}}}
+{"event_type":"SESSION_END","timestamp":1770545206,"reason":"user_shutdown"}

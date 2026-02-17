@@ -1,0 +1,2 @@
+{"event_type":"SESSION_START","timestamp":1770442824,"token_ca":"GwMmiSLJ2ce5TY9bhTJCrbK8QNYgJETayDDaT3uJpump","config":{"token_ca":"GwMmiSLJ2ce5TY9bhTJCrbK8QNYgJETayDDaT3uJpump","refresh_rate":5.0,"mode":"live"}}
+{"event_type":"SESSION_END","timestamp":1770442938,"reason":"user_shutdown"}

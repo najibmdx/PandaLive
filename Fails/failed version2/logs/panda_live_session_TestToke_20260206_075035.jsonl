@@ -1,0 +1,4 @@
+{"event_type": "SESSION_START", "timestamp": 1770364235, "token_ca": "TestToken123", "config": {"token_ca": "TestToken123", "log_level": "INTELLIGENCE_ONLY", "refresh_rate": 5.0, "helius_enabled": false}}
+{"event_type": "TOKEN_STATE_TRANSITION", "timestamp": 1770364235, "token_ca": "TestToken123", "episode_id": 0, "from_state": "TOKEN_QUIET", "to_state": "TOKEN_IGNITION", "trigger": "re_ignition_same_episode"}
+{"event_type": "WALLET_SIGNAL", "timestamp": 1770364235, "token_ca": "TestToken123", "episode_id": 0, "wallet": "whale1", "signals": ["TIMING"], "details": {"is_early": true, "early_type": "relative", "seconds_after_t0": 0}}
+{"event_type": "WALLET_SIGNAL", "timestamp": 1770364255, "token_ca": "TestToken123", "episode_id": 0, "wallet": "whale2", "signals": ["TIMING"], "details": {"is_early": true, "early_type": "relative", "seconds_after_t0": 20}}

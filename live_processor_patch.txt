@@ -1,0 +1,43 @@
+PATCH INSTRUCTIONS FOR live_processor.py
+=========================================
+
+CHANGE 1: Modify __init__ method
+---------------------------------
+
+FIND (around line 50):
+    self.whale_detector = WhaleDetector()
+
+REPLACE WITH:
+    self.whale_detector = None  # Will be initialized with dynamic thresholds after first poll
+
+
+CHANGE 2: Modify process_flow method
+-------------------------------------
+
+FIND (around line 150):
+    # Phase 1: Time windows + whale detection
+    self.time_window_mgr.add_flow(ws, flow)
+    whale_events = self.whale_detector.check_thresholds(ws, flow)
+
+REPLACE WITH:
+    # INITIALIZE WHALE DETECTOR with dynamic thresholds (on first flow)
+    if self.whale_detector is None:
+        from ..config.dynamic_thresholds import calculate_thresholds
+        
+        liquidity = 50.0  # Default
+        if self.helius_client:
+            liquidity = self.helius_client.get_estimated_liquidity()
+        
+        thresholds = calculate_thresholds(liquidity)
+        
+        from ..core.whale_detection import WhaleDetector
+        self.whale_detector = WhaleDetector(thresholds)
+        
+        print(f"[PANDA] Dynamic thresholds: {thresholds}", flush=True)
+    
+    # Phase 1: Time windows + whale detection
+    self.time_window_mgr.add_flow(ws, flow)
+    whale_events = self.whale_detector.check_thresholds(ws, flow)
+
+
+THAT'S IT! Two small changes.
