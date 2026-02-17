@@ -104,7 +104,16 @@ class TokenPanel:
             if len(ws.minute_buckets) >= 2
         )
         early_pct = f"({early_active * 100 // active}%)" if active > 0 else "(0%)"
-        lines.append(f" Capital: PRESENT | Active: {active} | Early: {early_active} {early_pct} | Persist: {persistent}")
+        # Capital flow with direction awareness
+        net_flow = token_state.compute_net_flow()
+        if net_flow > 0:
+            flow_label = f"INFLOW +{net_flow:.1f}"
+        elif net_flow < 0:
+            flow_label = f"OUTFLOW {net_flow:.1f}"
+        else:
+            flow_label = "NEUTRAL 0.0"
+        buy_sell = f"{token_state.buy_tx_count}B/{token_state.sell_tx_count}S"
+        lines.append(f" Capital: {flow_label} SOL ({buy_sell}) | Active: {active} | Early: {early_active} {early_pct} | Persist: {persistent}")
 
         # Line 5: Pressure: → | Silent: X/Y | Repl: YES|NO
         silent_x, silent_y, _ = token_state.compute_silent(current_time)

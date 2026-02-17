@@ -45,9 +45,15 @@ class TokenState:
     # Exhaustion signal dedup
     last_exhaustion_signaled_pct: float = 0.0
 
-    # Density tracking: list of (timestamp, wallet_address) tuples
-    whale_events_2min: List[Tuple[int, str]] = field(default_factory=list)
+    # Density tracking: list of (timestamp, wallet_address, direction) tuples
+    whale_events_2min: List[Tuple[int, str, str]] = field(default_factory=list)
     episode_max_density: float = 0.0
+
+    # Direction awareness (token-level aggregates)
+    total_buy_volume_sol: float = 0.0   # Aggregate buy volume
+    total_sell_volume_sol: float = 0.0  # Aggregate sell volume
+    buy_tx_count: int = 0               # Total buy transactions
+    sell_tx_count: int = 0              # Total sell transactions
 
     def compute_silent(self, current_time: int) -> Tuple[int, int, float]:
         """Compute silent X/Y/pct using EVENT-DRIVEN pattern detection.
@@ -93,3 +99,14 @@ class TokenState:
                 if (current_time - ws.last_seen) < LOOKBACK:
                     return "YES"
         return "NO"
+
+    def compute_net_flow(self) -> float:
+        """Compute net SOL flow (positive = inflow, negative = outflow)."""
+        return self.total_buy_volume_sol - self.total_sell_volume_sol
+
+    def compute_sell_ratio(self) -> float:
+        """Compute sell transactions as fraction of total transactions."""
+        total = self.buy_tx_count + self.sell_tx_count
+        if total == 0:
+            return 0.0
+        return self.sell_tx_count / total

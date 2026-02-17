@@ -42,6 +42,16 @@ class TimeWindowManager:
         wallet_state.last_seen = ts
         wallet_state.activity_count += 1
 
+        # Direction tracking
+        wallet_state.last_direction = flow.direction
+        if flow.direction == "buy":
+            wallet_state.total_buy_sol += amount
+            wallet_state.buy_count += 1
+        else:
+            wallet_state.total_sell_sol += amount
+            wallet_state.sell_count += 1
+            wallet_state.has_sold = True
+
     def expire_old_flows(self, wallet_state: WalletState, current_time: int) -> None:
         """Remove flows older than window boundaries and adjust cumulative sums.
 

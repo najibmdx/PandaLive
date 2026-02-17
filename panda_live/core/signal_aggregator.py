@@ -53,17 +53,19 @@ class SignalAggregator:
                 "delta_seconds": wallet_state.first_seen - ref_time,
             }
 
-        # 2. COORDINATION
-        is_coord, coordinated_wallets = self.detector.detect_coordination(
+        # 2. COORDINATION (direction-aware)
+        is_coord, coordinated_wallets, coord_direction = self.detector.detect_coordination(
             whale_event, current_time
         )
         if is_coord:
-            signals.append("COORDINATION")
+            coord_signal = f"COORDINATION_{coord_direction.upper()}"
+            signals.append(coord_signal)
             others = [w for w in coordinated_wallets if w != wallet_state.address]
             details["coordination"] = {
                 "wallet_count": len(coordinated_wallets),
                 "time_window_s": 60,
                 "sample_wallets": others[:COORDINATION_SAMPLE_WALLETS],
+                "direction": coord_direction,
             }
 
         # 3. PERSISTENCE

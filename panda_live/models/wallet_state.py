@@ -37,6 +37,14 @@ class WalletState:
     # Episode activity tracking (for silent eligibility)
     activity_count: int = 0  # Incremented on each flow processed by pipeline
 
+    # Direction awareness
+    total_buy_sol: float = 0.0          # Lifetime buy volume in SOL
+    total_sell_sol: float = 0.0         # Lifetime sell volume in SOL
+    buy_count: int = 0                  # Number of buy transactions
+    sell_count: int = 0                 # Number of sell transactions
+    last_direction: str = ""            # "buy" or "sell" — most recent trade
+    has_sold: bool = False              # Latch: wallet has sold at least once
+
     # Signal detection state
     timing_checked: bool = False
     wave_id_at_entry: int = 1

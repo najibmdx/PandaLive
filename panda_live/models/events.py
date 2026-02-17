@@ -41,6 +41,7 @@ class WhaleEvent:
     amount_sol: float
     threshold: float
     token_ca: str
+    direction: Literal["buy", "sell"] = "buy"  # Default "buy" for backward compat
 
 
 @dataclass
