@@ -50,7 +50,8 @@ class WalletSignalDetector:
             return False, ""
 
         ref_time = token_state.wave_start_time if token_state.wave_start_time else token_state.t0
-        is_early = (wallet_state.first_seen - ref_time) <= EARLY_WINDOW
+        delta = wallet_state.first_seen - ref_time
+        is_early = (0 <= delta <= EARLY_WINDOW)
 
         wallet_state.timing_checked = True
         wallet_state.is_early = is_early
