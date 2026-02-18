@@ -167,6 +167,14 @@ class LiveProcessor:
         else:
             ws = self.token_state.active_wallets[wallet]
 
+        # Token-level direction tracking
+        if flow.direction == "buy":
+            self.token_state.total_buy_volume_sol += flow.amount_sol
+            self.token_state.buy_tx_count += 1
+        else:
+            self.token_state.total_sell_volume_sol += flow.amount_sol
+            self.token_state.sell_tx_count += 1
+
         # INITIALIZE WHALE DETECTOR with dynamic thresholds (on first flow)
         if self.whale_detector is None:
             from ..config.dynamic_thresholds import calculate_thresholds
@@ -193,7 +201,8 @@ class LiveProcessor:
         for whale_event in whale_events:
             self.session_logger.log_whale_event(whale_event)
             self.state_machine.density_tracker.add_whale_event(
-                self.token_state, whale_event.wallet, whale_event.timestamp
+                self.token_state, whale_event.wallet, whale_event.timestamp,
+                whale_event.direction
             )
 
         # Signal detection → ONCE per wallet per flow (first event carries the wallet context)
@@ -207,7 +216,8 @@ class LiveProcessor:
         
         # EVENT-DRIVEN PATTERN DETECTION
         # EVENT TRIGGER 1: Wallet just traded (update activity metrics)
-        self.pattern_detector.on_wallet_trade(ws, current_time, self.token_state)
+        self.pattern_detector.on_wallet_trade(ws, current_time, self.token_state,
+                                               flow.direction)
         
         # EVENT TRIGGER 2: Token has activity (cohort comparison)
         # Check all wallets relative to this activity event

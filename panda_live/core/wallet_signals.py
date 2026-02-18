@@ -66,14 +66,15 @@ class WalletSignalDetector:
         self,
         whale_event: WhaleEvent,
         current_time: int,
-    ) -> Tuple[bool, List[str]]:
+    ) -> Tuple[bool, List[str], str]:
         """Detect COORDINATION: 3+ whale events within 60s window.
-        
+
         Maintains a sliding window of recent whale events and checks for
-        distinct wallet clustering.
+        distinct wallet clustering. Returns direction of the dominant side.
 
         Returns:
-            (is_coordinated, list_of_coordinated_wallet_addresses)
+            (is_coordinated, list_of_coordinated_wallet_addresses, coord_direction)
+            coord_direction is "buy", "sell", or "mixed"
         """
         self.recent_whale_events.append(whale_event)
 
@@ -86,9 +87,20 @@ class WalletSignalDetector:
         unique_wallets = {e.wallet for e in self.recent_whale_events}
 
         if len(unique_wallets) >= COORDINATION_MIN_WALLETS:
-            return True, sorted(unique_wallets)
+            # Determine coordination direction
+            buy_wallets = {e.wallet for e in self.recent_whale_events if e.direction == "buy"}
+            sell_wallets = {e.wallet for e in self.recent_whale_events if e.direction == "sell"}
 
-        return False, []
+            if len(sell_wallets) == 0:
+                coord_direction = "buy"
+            elif len(buy_wallets) == 0:
+                coord_direction = "sell"
+            else:
+                coord_direction = "mixed"
+
+            return True, sorted(unique_wallets), coord_direction
+
+        return False, [], ""
 
     def detect_persistence(
         self,

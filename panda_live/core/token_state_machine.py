@@ -149,19 +149,19 @@ class TokenStateMachine:
                     current_time,
                 )
 
-        # PARTICIPATION_EXPANSION -> PRESSURE_PEAKING (5+ whales in 2min, episode max)
+        # PARTICIPATION_EXPANSION -> PRESSURE_PEAKING (5+ BUY whales in 2min, episode max)
         if current == "TOKEN_PARTICIPATION_EXPANSION":
-            whale_count, density = self.density_tracker.get_current_density(token_state)
-            if whale_count >= PRESSURE_PEAKING_MIN_WHALES:
+            buy_count, buy_density = self.density_tracker.get_buy_density(token_state)
+            if buy_count >= PRESSURE_PEAKING_MIN_WHALES:
                 is_max = self.density_tracker.is_episode_max_density(
-                    token_state, density
+                    token_state, buy_density
                 )
                 if is_max:
                     return self._transition(
                         token_state,
                         "TOKEN_PRESSURE_PEAKING",
-                        "5+_whales_2min_episode_max",
-                        {"whale_count": whale_count, "density": round(density, 4)},
+                        "5+_buy_whales_2min_episode_max",
+                        {"buy_whale_count": buy_count, "buy_density": round(buy_density, 4)},
                         current_time,
                     )
 
@@ -303,6 +303,7 @@ class TokenStateMachine:
             ws.silent_pattern = ""
             ws.silent_since = 0
             ws.timing_checked = False  # Allow re-classification for new wave
+            ws.has_sold = False        # Reset sell latch for new wave
 
     def _get_current_disengagement(self, token_state: TokenState) -> float:
         """Get current wave disengagement percentage."""

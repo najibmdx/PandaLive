@@ -58,6 +58,7 @@ class WhaleDetector:
                     amount_sol=flow.amount_sol,
                     threshold=self.whale_single_tx_sol,
                     token_ca=flow.token_ca,
+                    direction=flow.direction,
                 )
             )
 
@@ -75,6 +76,7 @@ class WhaleDetector:
                     amount_sol=wallet_state.cumulative_5min,
                     threshold=self.whale_cum_5min_sol,
                     token_ca=flow.token_ca,
+                    direction=flow.direction,
                 )
             )
 
@@ -92,6 +94,7 @@ class WhaleDetector:
                     amount_sol=wallet_state.cumulative_15min,
                     threshold=self.whale_cum_15min_sol,
                     token_ca=flow.token_ca,
+                    direction=flow.direction,
                 )
             )
 

@@ -92,6 +92,7 @@ class SessionLogger:
             "amount_sol": whale.amount_sol,
             "threshold": whale.threshold,
             "token_ca": whale.token_ca,
+            "direction": whale.direction,
         })
 
     def log_wallet_signal(self, signal_event: WalletSignalEvent) -> None:
