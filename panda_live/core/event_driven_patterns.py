@@ -115,20 +115,26 @@ class EventDrivenPatternDetector:
                 # Token is active (we're in this function because activity happened)
                 # But this wallet hasn't traded in 2+ minutes
                 # BEHAVIORAL: Wallet stopped while others continue
-                
+
                 if not wallet_state.is_silent:  # New detection
                     wallet_state.is_silent = True
                     wallet_state.silent_pattern = "COHORT_COMPARISON"
                     wallet_state.silent_since = current_time
-                
+
                 results[wallet_addr] = (True, "COHORT_COMPARISON")
             else:
-                # Wallet is participating - not silent
-                if wallet_state.is_silent:  # Was silent, now active
-                    wallet_state.is_silent = False
-                    wallet_state.silent_pattern = ""
-                
-                results[wallet_addr] = (False, "ACTIVE")
+                # Wallet has recent activity — but what kind?
+                # DIRECTION-AWARE: only BUY activity counts as "participation"
+                # A wallet that is only selling is EXITING, not re-engaging.
+                # If it was already silent and its last action was a sell,
+                # keep it silent — selling doesn't prove active participation.
+                if wallet_state.is_silent and wallet_state.last_direction == "sell":
+                    results[wallet_addr] = (True, wallet_state.silent_pattern)
+                else:
+                    if wallet_state.is_silent:  # Was silent, now actively buying
+                        wallet_state.is_silent = False
+                        wallet_state.silent_pattern = ""
+                    results[wallet_addr] = (False, "ACTIVE")
         
         return results
     

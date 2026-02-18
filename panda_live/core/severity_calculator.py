@@ -138,7 +138,7 @@ class SeverityCalculator:
 
     def _severity_pressure_peaking(self, details: dict) -> str:
         """Floor S3. S4 at 7+ whales, S5 at 10+."""
-        whale_count = details.get("whale_count", 5)
+        whale_count = details.get("buy_whale_count", details.get("whale_count", 5))
         if whale_count >= 10:
             return SEVERITY_EXTREME
         if whale_count >= 7:
