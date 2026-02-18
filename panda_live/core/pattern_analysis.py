@@ -130,25 +130,20 @@ class PatternAnalyzer:
     def _compute_capital(
         self, verdict: PatternVerdict, token_state: TokenState
     ) -> None:
-        """Derive capital verdict from net flow and sell pressure ratio.
+        """Derive capital verdict from net SOL flow.
 
-        Reads: token_state.compute_net_flow(), compute_sell_ratio()
+        NET FLOW IS THE PRIMARY SIGNAL — ALWAYS.
+        Sign of net_flow determines INFLOW vs OUTFLOW. No exceptions.
+        Transaction count ratio is displayed as context only.
 
-        Both already computed in TokenState — zero new logic.
+        STRONG vs WEAK: net flow > 15% of total volume = material (STRONG).
+        This ratio threshold works across all token sizes.
 
-        Thresholds are ratio-based (not SOL amounts) so they work across
-        all token sizes:
-
-        Sell ratio:
-            > 0.65  = strong sell pressure
-            > 0.55  = weak sell pressure
-            0.45-0.55 = neutral
-            < 0.45  = buy pressure
-            < 0.35  = strong buy pressure
-
-        Combined with net_flow sign for final label.
-
-        Detail string shows exact numbers so trader can verify.
+        Why net flow, not tx count:
+        Memecoins routinely show majority buy *count* with net SOL *outflow*
+        because whales exit in large amounts while retail buys in small amounts.
+        Count ratio would label this INFLOW_STRONG — a directional lie.
+        Net flow cannot be fooled by transaction size asymmetry.
         """
         total_tx = token_state.buy_tx_count + token_state.sell_tx_count
         if total_tx == 0:
@@ -157,25 +152,28 @@ class PatternAnalyzer:
             return
 
         net_flow = token_state.compute_net_flow()
-        sell_ratio = token_state.compute_sell_ratio()
-        buy_ratio = 1.0 - sell_ratio
+        total_volume = token_state.total_buy_volume_sol + token_state.total_sell_volume_sol
 
-        # Label
-        if sell_ratio > 0.65:
-            verdict.capital_verdict = "OUTFLOW_STRONG"
-        elif sell_ratio > 0.55:
-            verdict.capital_verdict = "OUTFLOW_WEAK"
-        elif sell_ratio < 0.35:
-            verdict.capital_verdict = "INFLOW_STRONG"
-        elif sell_ratio < 0.45:
-            verdict.capital_verdict = "INFLOW_WEAK"
+        # STRONG vs WEAK: is net flow material relative to total volume?
+        if total_volume > 0:
+            flow_ratio = abs(net_flow) / total_volume
+            is_strong = flow_ratio >= 0.15
+        else:
+            is_strong = False
+
+        # PRIMARY: sign of net_flow determines direction
+        if net_flow > 0:
+            verdict.capital_verdict = "INFLOW_STRONG" if is_strong else "INFLOW_WEAK"
+        elif net_flow < 0:
+            verdict.capital_verdict = "OUTFLOW_STRONG" if is_strong else "OUTFLOW_WEAK"
         else:
             verdict.capital_verdict = "NEUTRAL"
 
-        # Detail string
+        # Detail string: exact numbers + tx count context
         net_sign = "+" if net_flow >= 0 else ""
+        sell_ratio = token_state.compute_sell_ratio()
         sell_pct = int(sell_ratio * 100)
-        buy_pct = int(buy_ratio * 100)
+        buy_pct = 100 - sell_pct
         verdict.capital_detail = (
             f"{net_sign}{net_flow:.1f} SOL | "
             f"{token_state.buy_tx_count}B / {token_state.sell_tx_count}S "
@@ -187,26 +185,29 @@ class PatternAnalyzer:
     ) -> None:
         """Derive exhaustion label from current wave silent percentage.
 
-        Reads: token_state.wave_early_wallets, wallet_state.is_silent flags
-        (same data exhaustion detection reads — no duplication of detection logic,
-        just reading the already-computed output)
+        Reads: token_state.wave_early_wallets, wallet_state.is_silent flags.
+        These are pre-computed by EventDrivenPatternDetector — no detection here.
 
-        Thresholds derived from the same 60% exhaustion threshold already in use,
-        expressed as graduated labels:
+        Empty wave_early_wallets has two meanings:
+        - Wave 1, no whales yet          -> "Wave 1 cohort forming"
+        - Wave N>1, post-reset forming   -> "Wave N cohort forming"
+        Both are handled by checking current_wave.
 
+        Exhaustion labels graduated from the existing 60% threshold:
             < 30%  = NONE
             30-50% = EARLY
-            50-70% = SIGNIFICANT  (crosses the 60% trigger point here)
+            50-70% = SIGNIFICANT   (60% trigger point falls here)
             70-85% = SEVERE
             > 85%  = CRITICAL
-
-        Detail string shows count + wave context.
         """
         wave_early = token_state.wave_early_wallets
+        wave_num = token_state.current_wave
+
+        # Empty cohort — always means "forming", never "none yet"
         if not wave_early:
             verdict.exhaustion_label = "NONE"
             verdict.exhaustion_pct = 0.0
-            verdict.exhaustion_detail = "no early cohort yet"
+            verdict.exhaustion_detail = f"Wave {wave_num} cohort forming"
             return
 
         silent_count = sum(
@@ -231,6 +232,6 @@ class PatternAnalyzer:
             verdict.exhaustion_label = "NONE"
 
         verdict.exhaustion_detail = (
-            f"{silent_count}/{total} wave {token_state.current_wave} "
+            f"{silent_count}/{total} wave {wave_num} "
             f"early wallets silent ({int(pct * 100)}%)"
         )
