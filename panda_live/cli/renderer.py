@@ -9,6 +9,7 @@ import sys
 import time
 from typing import Dict, List, Optional
 
+from ..core.pattern_analysis import PatternVerdict
 from ..models.events import StateTransitionEvent, WalletSignalEvent
 from ..models.token_state import TokenState
 from .layout import calculate_layout
@@ -34,6 +35,7 @@ class CLIRenderer:
         self.event_panel = EventPanel()
         self._recent_transitions: List[StateTransitionEvent] = []
         self._wallet_signals: Dict[str, List[str]] = {}
+        self._latest_verdict: Optional[PatternVerdict] = None
 
     def add_transition(self, transition: StateTransitionEvent) -> None:
         """Record a state transition and add to event stream."""
@@ -51,10 +53,15 @@ class CLIRenderer:
         """Add informational message to event stream."""
         self.event_panel.add_info(message)
 
+    def update_verdict(self, verdict: PatternVerdict) -> None:
+        """Store latest pattern verdict for next render."""
+        self._latest_verdict = verdict
+
     def render_frame(
         self,
         token_state: TokenState,
         current_time: int,
+        verdict: Optional[PatternVerdict] = None,
     ) -> str:
         """Render a complete display frame.
 
@@ -79,7 +86,8 @@ class CLIRenderer:
         right_width = cols - left_width - 3  # 3 for border + separator
 
         token_lines = self.token_panel.render(
-            token_state, self._recent_transitions, current_time, panel_height
+            token_state, self._recent_transitions, current_time, panel_height,
+            verdict=verdict or self._latest_verdict
         )
         wallet_lines = self.wallet_panel.render(
             token_state, self._wallet_signals, panel_height
