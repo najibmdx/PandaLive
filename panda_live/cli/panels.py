@@ -9,6 +9,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from ..config.thresholds import MAX_EVENT_BUFFER_BYTES, MAX_WALLET_LINES
+from ..core.pattern_analysis import PatternVerdict
 from ..models.events import StateTransitionEvent, WalletSignalEvent
 from ..models.token_state import TokenState
 from ..models.wallet_state import WalletState
@@ -64,6 +65,7 @@ class TokenPanel:
         recent_transitions: List[StateTransitionEvent],
         current_time: int,
         max_lines: int = 15,
+        verdict: Optional[PatternVerdict] = None,
     ) -> List[str]:
         """Render token intelligence panel.
 
@@ -136,7 +138,29 @@ class TokenPanel:
         # Line 7: blank
         lines.append("")
 
-        # Line 8+: Recent Transitions
+        # UPGRADE 2: Pattern Verdict block
+        if verdict is not None:
+            # Wave trend
+            trend_line = f" Conviction: {verdict.wave_trend}"
+            if verdict.wave_trend_detail:
+                trend_line += f"  [{verdict.wave_trend_detail}]"
+            lines.append(trend_line)
+
+            # Capital
+            cap_line = f" Capital:    {verdict.capital_verdict}"
+            if verdict.capital_detail:
+                cap_line += f"  {verdict.capital_detail}"
+            lines.append(cap_line)
+
+            # Exhaustion
+            exhaust_line = f" Cohort:     {verdict.exhaustion_label}"
+            if verdict.exhaustion_detail:
+                exhaust_line += f"  {verdict.exhaustion_detail}"
+            lines.append(exhaust_line)
+
+            lines.append("")  # spacer
+
+        # Recent Transitions
         lines.append(" Recent Transitions:")
         if recent_transitions:
             for t in recent_transitions[: max_lines - len(lines)]:

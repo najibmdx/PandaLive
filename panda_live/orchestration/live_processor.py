@@ -17,6 +17,7 @@ from ..cli.renderer import CLIRenderer
 from ..config.thresholds import EARLY_WINDOW
 from ..core.chain_time_clock import ChainTimeClock
 from ..core.event_driven_patterns import EventDrivenPatternDetector
+from ..core.pattern_analysis import PatternAnalyzer, PatternVerdict
 from ..core.signal_aggregator import SignalAggregator
 from ..core.time_windows import TimeWindowManager
 from ..core.token_state_machine import TokenStateMachine
@@ -58,6 +59,10 @@ class LiveProcessor:
         
         # EVENT-DRIVEN PATTERN DETECTION (data-driven from 7GB database)
         self.pattern_detector = EventDrivenPatternDetector()
+
+        # Pattern analysis (synthesis layer — Upgrade 2)
+        self.pattern_analyzer = PatternAnalyzer()
+        self._latest_verdict: Optional[PatternVerdict] = None
 
         # Phase 3 components (includes Phase 3.5 severity)
         self.state_machine = TokenStateMachine()
@@ -246,6 +251,13 @@ class LiveProcessor:
             self.session_logger.log_state_transition(transition)
             self.renderer.add_transition(transition)
 
+        # UPGRADE 2: Re-analyze on every state transition
+        if transition:
+            self._latest_verdict = self.pattern_analyzer.analyze(
+                self.token_state, current_time
+            )
+            if self._latest_verdict:
+                self.renderer.update_verdict(self._latest_verdict)
 
     def _should_refresh(self) -> bool:
         """Check if enough time has elapsed for a display refresh."""
@@ -259,7 +271,11 @@ class LiveProcessor:
         """Render and display the current frame using chain-aligned time."""
         current_time = self.clock.now()
         self.token_state.chain_now = current_time
-        frame = self.renderer.render_frame(self.token_state, current_time)
+        # Re-run analysis on each display refresh (reads pre-computed state, cheap)
+        current_verdict = self.pattern_analyzer.analyze(self.token_state, current_time)
+        frame = self.renderer.render_frame(
+            self.token_state, current_time, verdict=current_verdict
+        )
         self.renderer.display(frame)
 
     def shutdown(self) -> None:
