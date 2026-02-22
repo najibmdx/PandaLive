@@ -19,8 +19,6 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import math
-import os
 import sqlite3
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
@@ -427,7 +425,6 @@ def evaluate_mint(
     metadata: Dict[str, Dict[str, int]],
     liq_events: Dict[str, List[Tuple[int, str, float]]],
     holder_snapshots: Dict[str, Dict[int, List[float]]],
-    unavailable: Sequence[str],
     args: argparse.Namespace,
 ) -> Tuple[List[List[str]], List[str], Counter, int, List[List[str]]]:
     if not rows:
@@ -785,7 +782,6 @@ def main() -> None:
             metadata,
             liq,
             holders,
-            missing,
             args,
         )
         timeline_rows.extend(step_rows)
