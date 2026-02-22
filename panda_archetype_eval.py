@@ -133,9 +133,15 @@ def detect_categories(tables: Sequence[TableInfo]) -> Dict[str, CategoryTable]:
             "ts": ("timestamp", "ts", "time", "block_time", "slot_time", "event_time"),
             "wallet": ("wallet", "scan_wallet", "owner", "address", "trader", "user", "signer"),
             "mint": ("mint", "token_mint", "token", "mint_address", "ca"),
-            "amount": ("amount", "qty", "quantity", "token_amount", "size", "volume"),
-            "side": ("side", "direction", "action", "type"),
+            "amount": ("sol_amount_lamports", "token_amount_raw", "amount", "qty", "quantity", "token_amount", "size", "volume"),
+            "side": ("sol_direction", "side", "direction", "action", "type"),
             "txid": ("txid", "signature", "tx_hash", "transaction", "txn"),
+            "sol_direction": ("sol_direction",),
+            "sol_amount": ("sol_amount_lamports",),
+            "has_sol_leg": ("has_sol_leg",),
+            "dex": ("dex",),
+            "in_mint": ("in_mint",),
+            "out_mint": ("out_mint",),
         },
         "clusters": {
             "wallet_a": ("wallet_a", "from_wallet", "src_wallet", "source_wallet", "node_a"),
@@ -174,6 +180,9 @@ def detect_categories(tables: Sequence[TableInfo]) -> Dict[str, CategoryTable]:
             if category == "events":
                 required = {"ts", "wallet", "mint"}
                 if not required.issubset(set(mapping.keys())):
+                    continue
+                swap_discriminators = {"sol_direction", "sol_amount", "has_sol_leg", "dex", "in_mint", "out_mint"}
+                if not swap_discriminators.intersection(set(mapping.keys())):
                     continue
                 # hard preference for complete bindings over partial matches
                 score += 100
