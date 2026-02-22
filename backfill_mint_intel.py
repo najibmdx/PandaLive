@@ -26,6 +26,7 @@ import base64
 import json
 import sqlite3
 import struct
+import math
 import sys
 import threading
 import time
@@ -77,23 +78,25 @@ class MintResult:
 
 class GlobalRateLimiter:
     def __init__(self, rps: float):
-        self.max_calls = float(rps) if rps > 0 else 0.0
+        self.rps = float(rps) if rps > 0 else 0.0
+        self.window_calls = max(1, int(math.ceil(self.rps))) if self.rps > 0 else 0
+        self.window_seconds = (self.window_calls / self.rps) if self.rps > 0 else 0.0
         self.lock = threading.Lock()
         self.calls: Deque[float] = deque()
 
     def acquire(self) -> None:
-        if self.max_calls <= 0:
+        if self.rps <= 0:
             return
         while True:
             wait_for = 0.0
             now = time.monotonic()
             with self.lock:
-                while self.calls and (now - self.calls[0]) >= 1.0:
+                while self.calls and (now - self.calls[0]) >= self.window_seconds:
                     self.calls.popleft()
-                if float(len(self.calls)) < self.max_calls:
+                if len(self.calls) < self.window_calls:
                     self.calls.append(now)
                     return
-                wait_for = 1.0 - (now - self.calls[0])
+                wait_for = self.window_seconds - (now - self.calls[0])
             if wait_for > 0:
                 time.sleep(wait_for)
 
@@ -543,7 +546,7 @@ def flush_batch(
 
 def main() -> int:
     args = parse_args()
-    mode = f"indexer={args.indexer}|mint={args.mint or '*'}|limit={args.limit}|workers={args.workers}|rps={args.rate_rps}"
+    mode = f"indexer={args.indexer}|mint={args.mint or '*'}|limit={args.limit}"
 
     conn = sqlite3.connect(args.db)
     conn.row_factory = sqlite3.Row
@@ -557,9 +560,10 @@ def main() -> int:
     processed = int(resume_row["processed_mints"] or 0) if resume_row else 0
     errors = int(resume_row["errors"] or 0) if resume_row else 0
 
-    total = count_mints(conn, table, col, resume_last_mint, args.mint)
+    remaining = count_mints(conn, table, col, resume_last_mint, args.mint)
     if args.limit > 0:
-        total = min(total, args.limit)
+        remaining = min(remaining, args.limit)
+    total = processed + remaining
 
     if run_id is None:
         run_id = create_run(conn, mode, total)
