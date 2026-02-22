@@ -68,6 +68,9 @@ CONFIG: Dict[str, Any] = {
     "risk_warning": 0.55,
     "risk_shout": 0.75,
     "ghost_decay_steps": 5,
+    "liq_floor_usd": 3000.0,
+    "authority_risk_component": 1.0,
+    "low_liquidity_risk_component": 1.0,
 }
 
 
@@ -155,12 +158,30 @@ def detect_categories(tables: Sequence[TableInfo]) -> Dict[str, CategoryTable]:
             "freeze_authority": ("freeze_authority", "authority_freeze", "has_freeze_authority"),
             "mutable": ("is_mutable", "mutable", "metadata_mutable"),
         },
-        "liquidity": {
+        "lp_events": {
             "ts": ("timestamp", "ts", "time", "block_time", "event_time"),
             "mint": ("mint", "token_mint", "token"),
             "action": ("action", "side", "type", "event"),
             "liquidity": ("liquidity", "pool_liquidity", "tvl", "lp_liquidity"),
             "amount": ("amount", "qty", "token_amount", "delta"),
+        },
+        "security": {
+            "mint": ("mint", "token_mint", "mint_address", "token"),
+            "mint_authority": ("mint_authority",),
+            "freeze_authority": ("freeze_authority",),
+            "token_program": ("token_program",),
+            "decimals": ("decimals",),
+            "supply_raw": ("supply_raw",),
+            "last_updated": ("last_updated",),
+        },
+        "liquidity": {
+            "mint": ("mint", "token_mint", "mint_address", "token"),
+            "liquidity_usd": ("liquidity_usd",),
+            "primary_pool": ("primary_pool",),
+            "lp_locked_pct": ("lp_locked_pct",),
+            "lp_lock_flag": ("lp_lock_flag",),
+            "source": ("source",),
+            "last_updated": ("last_updated",),
         },
         "holders": {
             "ts": ("timestamp", "ts", "time", "snapshot_time", "block_time"),
@@ -270,6 +291,46 @@ def fetch_metadata(conn: sqlite3.Connection, table: CategoryTable) -> Dict[str, 
     return out
 
 
+
+
+def fetch_security_backfill(conn: sqlite3.Connection, table: CategoryTable) -> Dict[str, Dict[str, int]]:
+    if not table.table:
+        return {}
+    m = table.mapping
+    if "mint" not in m:
+        return {}
+    cols = [m["mint"], m.get("mint_authority", "NULL"), m.get("freeze_authority", "NULL")]
+    sql = f"SELECT {', '.join(cols)} FROM {table.table} ORDER BY {m['mint']}"
+    out: Dict[str, Dict[str, int]] = {}
+    for row in conn.execute(sql):
+        mint = str(row[0]) if row[0] is not None else ""
+        if not mint:
+            continue
+        mint_auth = 1 if row[1] not in (None, "", 0, "0", False) else 0
+        freeze_auth = 1 if row[2] not in (None, "", 0, "0", False) else 0
+        out[mint] = {
+            "mint_authority_present": mint_auth,
+            "freeze_authority_present": freeze_auth,
+        }
+    return out
+
+
+def fetch_liquidity_backfill(conn: sqlite3.Connection, table: CategoryTable) -> Dict[str, Dict[str, Optional[float]]]:
+    if not table.table:
+        return {}
+    m = table.mapping
+    if "mint" not in m:
+        return {}
+    cols = [m["mint"], m.get("liquidity_usd", "NULL")]
+    sql = f"SELECT {', '.join(cols)} FROM {table.table} ORDER BY {m['mint']}"
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    for row in conn.execute(sql):
+        mint = str(row[0]) if row[0] is not None else ""
+        if not mint:
+            continue
+        liq_usd = float(row[1]) if row[1] not in (None, "") else None
+        out[mint] = {"liquidity_usd": liq_usd}
+    return out
 def fetch_liquidity_events(conn: sqlite3.Connection, table: CategoryTable, mint_filter: Optional[str]) -> Dict[str, List[Tuple[int, str, float]]]:
     if not table.table:
         return {}
@@ -432,6 +493,8 @@ def evaluate_mint(
     mint: str,
     rows: Sequence[Tuple[int, str, float, str, str]],
     metadata: Dict[str, Dict[str, int]],
+    security_backfill: Dict[str, Dict[str, int]],
+    liquidity_backfill: Dict[str, Dict[str, Optional[float]]],
     liq_events: Dict[str, List[Tuple[int, str, float]]],
     holder_snapshots: Dict[str, Dict[int, List[float]]],
     args: argparse.Namespace,
@@ -478,6 +541,10 @@ def evaluate_mint(
             last_g = g
 
     meta = metadata.get(mint, {"mint_authority_active": 0, "freeze_authority_active": 0, "mutable_metadata": 0})
+    sec = security_backfill.get(mint, {"mint_authority_present": 0, "freeze_authority_present": 0})
+    liq_backfill = liquidity_backfill.get(mint, {"liquidity_usd": None})
+    authority_eligible = bool(sec.get("mint_authority_present") or sec.get("freeze_authority_present"))
+    liq_usd = liq_backfill.get("liquidity_usd")
 
     step_rows: List[List[str]] = []
     exemplars: List[List[str]] = []
@@ -591,6 +658,9 @@ def evaluate_mint(
             + w["P_MINUS"]["liquidity_deterioration"] * liq_deterioration
             + w["P_MINUS"]["concentration_spike"] * conc_spike
         )
+        authority_component = CONFIG["authority_risk_component"] if authority_eligible else 0.0
+        low_liq_flag = 1 if (liq_usd is not None and liq_usd <= CONFIG["liq_floor_usd"]) else 0
+        low_liq_component = CONFIG["low_liquidity_risk_component"] if low_liq_flag else 0.0
         fragility = (
             w["FRAGILITY"]["timing_cluster"] * timing_cluster
             + w["FRAGILITY"]["repeated_size"] * repeated_size
@@ -600,6 +670,8 @@ def evaluate_mint(
             + w["FRAGILITY"]["authority_flags"]
             * (meta["mint_authority_active"] + meta["freeze_authority_active"] + meta["mutable_metadata"])
             + w["FRAGILITY"]["concentration_spike"] * conc_spike
+            + authority_component
+            + low_liq_component
         )
 
         dom = dominant_dir(p_plus, p_minus)
@@ -641,10 +713,15 @@ def evaluate_mint(
                 else "WARNING: CONFLICT — engineered dump conditions"
             )
 
+        distinct_wallets_in_window = len(local_wallets)
+        top10_wallet_event_share = clique_density
+        bot_farm_gate = distinct_wallets_in_window <= 25 and top10_wallet_event_share >= 0.60
+        coordination_signature = timing_cluster > 0.7 and repeated_size > 0.7 and clique_density > 0.75
+
         signals = {
-            "vampire": liq_remove_count > 0 and outflow > inflow,
-            "time_bomb": (meta["mint_authority_active"] or meta["freeze_authority_active"]) and conc_spike == 1,
-            "bot_farm": timing_cluster > 0.7 and repeated_size > 0.7 and clique_density > 0.75,
+            "vampire": (liq_remove_count > 0 and outflow > inflow) or low_liq_flag == 1,
+            "time_bomb": authority_eligible,
+            "bot_farm": coordination_signature and bot_farm_gate,
             "phoenix": resurrection_count > 0 and inflow > outflow,
             "ghost": silent_gap_flag == 1,
             "accumulator": dom == "PUMP" and direction_persist >= 2,
@@ -765,6 +842,10 @@ def main() -> None:
 
     print(f"events.table: {categories['events'].table}")
     print(f"events.mapping: {categories['events'].mapping}")
+    print(f"security.table: {categories['security'].table}")
+    print(f"security.mapping: {categories['security'].mapping}")
+    print(f"liquidity.table: {categories['liquidity'].table}")
+    print(f"liquidity.mapping: {categories['liquidity'].mapping}")
 
     if not categories["events"].table:
         raise RuntimeError("Unable to identify events table by schema signature.")
@@ -775,7 +856,9 @@ def main() -> None:
         )
 
     metadata = fetch_metadata(conn, categories["metadata"])
-    liq = fetch_liquidity_events(conn, categories["liquidity"], args.mint)
+    security_backfill = fetch_security_backfill(conn, categories["security"])
+    liquidity_backfill = fetch_liquidity_backfill(conn, categories["liquidity"])
+    liq = fetch_liquidity_events(conn, categories["lp_events"], args.mint)
     holders = fetch_holder_snapshots(conn, categories["holders"], args.mint)
 
     timeline_rows: List[List[str]] = []
@@ -789,6 +872,8 @@ def main() -> None:
             mint,
             mint_rows,
             metadata,
+            security_backfill,
+            liquidity_backfill,
             liq,
             holders,
             args,
