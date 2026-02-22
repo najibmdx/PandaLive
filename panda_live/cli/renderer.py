@@ -1,7 +1,9 @@
-"""Terminal rendering engine for PANDA LIVE CLI.
+"""Terminal rendering engine for PANDA LIVE CLI — Upgrade 3.
 
-Renders adaptive split-screen display with token intelligence (left),
-wallet signals (right), and scrolling event stream (bottom).
+Renders adaptive split-screen display with three intelligence layers:
+  Left pane:  Token Intelligence (Regime Layer)
+  Right pane: Whale Watch (Capital Layer) + Wallet Signals (Emergence Layer)
+  Bottom:     Event Stream (intelligence only)
 """
 
 import os
@@ -13,7 +15,7 @@ from ..core.pattern_analysis import PatternVerdict
 from ..models.events import StateTransitionEvent, WalletSignalEvent
 from ..models.token_state import TokenState
 from .layout import calculate_layout
-from .panels import EventPanel, TokenPanel, WalletPanel
+from .panels import EmergenceState, EventPanel, TokenPanel, WalletPanel, _short_addr
 
 
 def _get_terminal_size() -> tuple:
@@ -22,7 +24,7 @@ def _get_terminal_size() -> tuple:
         size = os.get_terminal_size()
         return size.columns, size.lines
     except (OSError, ValueError):
-        return 120, 40
+        return 220, 50
 
 
 class CLIRenderer:
@@ -36,6 +38,7 @@ class CLIRenderer:
         self._recent_transitions: List[StateTransitionEvent] = []
         self._wallet_signals: Dict[str, List[str]] = {}
         self._latest_verdict: Optional[PatternVerdict] = None
+        self._emergence = EmergenceState()
 
     def add_transition(self, transition: StateTransitionEvent) -> None:
         """Record a state transition and add to event stream."""
@@ -43,11 +46,14 @@ class CLIRenderer:
         self._recent_transitions = self._recent_transitions[:20]
         self.event_panel.add_state_transition(transition)
 
-    def add_wallet_signal(self, signal: WalletSignalEvent) -> None:
-        """Record wallet signals and add to event stream."""
+    def record_wallet_signal(self, signal: WalletSignalEvent) -> None:
+        """Record wallet signals for wallet panel tracking only.
+
+        Deliberately does NOT add to event stream — wallet signals
+        are routed to Emergence Layer, not the intelligence stream.
+        """
         if signal.signals:
             self._wallet_signals[signal.wallet] = signal.signals
-            self.event_panel.add_wallet_signal(signal)
 
     def add_info(self, message: str) -> None:
         """Add informational message to event stream."""
@@ -56,6 +62,46 @@ class CLIRenderer:
     def update_verdict(self, verdict: PatternVerdict) -> None:
         """Store latest pattern verdict for next render."""
         self._latest_verdict = verdict
+
+    # ═══ Emergence Layer update methods ═══
+
+    def update_emergence_new_entry(self, count: int, tier: int, direction: str,
+                                    net_sol: float, timestamp: int) -> None:
+        """Update NEW ENTRY emergence signal."""
+        summary = f"{count}x Tier-{tier} {direction}  ({net_sol:+.1f} SOL)"
+        self._emergence.new_entry_summary = summary
+        self._emergence.new_entry_last = timestamp
+
+    def update_emergence_cluster(self, cluster_id: str,
+                                  wallet_count: int, timestamp: int) -> None:
+        """Update CLUSTER emergence signal."""
+        summary = f"CLU:{cluster_id} forming  ({wallet_count} wallets)"
+        self._emergence.cluster_summary = summary
+        self._emergence.cluster_last = timestamp
+
+    def update_emergence_flip(self, wallet_addr: str,
+                               net_sol: float, timestamp: int) -> None:
+        """Update FLIP emergence signal."""
+        short = _short_addr(wallet_addr)
+        summary = f"{short} reversing  ({net_sol:+.1f} SOL)"
+        self._emergence.flip_summary = summary
+        self._emergence.flip_last = timestamp
+
+    def update_emergence_inactivity(self, silent_count: int, timestamp: int) -> None:
+        """Update INACTIVITY emergence signal."""
+        summary = f"{silent_count} whales silent this wave"
+        self._emergence.inactivity_summary = summary
+        self._emergence.inactivity_last = timestamp
+
+    def update_emergence_distribution(self, cluster_id: str,
+                                       net_sol: float, timestamp: int) -> None:
+        """Update DISTRIBUTION emergence signal."""
+        clu = f"CLU:{cluster_id}" if cluster_id else "Whales"
+        summary = f"{clu} net sell burst  {net_sol:.1f} SOL"
+        self._emergence.distribution_summary = summary
+        self._emergence.distribution_last = timestamp
+
+    # ═══ Frame rendering ═══
 
     def render_frame(
         self,
@@ -68,6 +114,7 @@ class CLIRenderer:
         Args:
             token_state: Current token state.
             current_time: Current timestamp.
+            verdict: Optional pattern verdict override.
 
         Returns:
             Complete frame as a single string ready for terminal output.
@@ -90,7 +137,9 @@ class CLIRenderer:
             verdict=verdict or self._latest_verdict
         )
         wallet_lines = self.wallet_panel.render(
-            token_state, self._wallet_signals, panel_height
+            token_state, self._wallet_signals, panel_height,
+            emergence=self._emergence,
+            current_time=current_time,
         )
 
         # Top border
@@ -124,10 +173,8 @@ class CLIRenderer:
     def _render_header(
         self, token_state: TokenState, current_time: int, cols: int
     ) -> List[str]:
-        """Render the header bar."""
+        """Render the header bar with full token CA, episode, and duration."""
         mint_display = token_state.ca
-        if len(mint_display) > 20:
-            mint_display = f"{mint_display[:4]}...{mint_display[-4:]}"
 
         ep_str = f"Episode: {token_state.episode_id}"
 

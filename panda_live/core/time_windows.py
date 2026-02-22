@@ -52,6 +52,11 @@ class TimeWindowManager:
             wallet_state.sell_count += 1
             wallet_state.has_sold = True
 
+        # Upgrade 3: direction history for FLIPPING/delta_2m (capped at 20)
+        wallet_state.direction_history.append((ts, flow.direction, amount))
+        if len(wallet_state.direction_history) > 20:
+            wallet_state.direction_history.popleft()
+
     def expire_old_flows(self, wallet_state: WalletState, current_time: int) -> None:
         """Remove flows older than window boundaries and adjust cumulative sums.
 

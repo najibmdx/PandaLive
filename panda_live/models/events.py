@@ -52,6 +52,8 @@ class WaveRecord:
     end_time: int
     early_wallet_count: int
     peak_disengagement: float
+    peak_density: float = 0.0            # episode_max_density at wave close
+    peak_buy_whale_count: int = 0        # max unique buy whales in 2min window at close
 
 
 @dataclass

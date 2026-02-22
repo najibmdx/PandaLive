@@ -275,6 +275,9 @@ class TokenStateMachine:
         """Archive current wave and start a new one."""
         from panda_live.models.events import WaveRecord
 
+        # Capture density + buy whale count BEFORE reset
+        buy_count, _ = self.density_tracker.get_buy_density(token_state)
+
         # Archive exhausted wave
         token_state.wave_history.append(WaveRecord(
             wave_id=token_state.current_wave,
@@ -282,6 +285,8 @@ class TokenStateMachine:
             end_time=current_time,
             early_wallet_count=len(token_state.wave_early_wallets),
             peak_disengagement=self._get_current_disengagement(token_state),
+            peak_density=token_state.episode_max_density,
+            peak_buy_whale_count=buy_count,
         ))
 
         # Increment wave

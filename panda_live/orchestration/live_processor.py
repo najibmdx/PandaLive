@@ -21,6 +21,7 @@ from ..core.pattern_analysis import PatternAnalyzer, PatternVerdict
 from ..core.signal_aggregator import SignalAggregator
 from ..core.time_windows import TimeWindowManager
 from ..core.token_state_machine import TokenStateMachine
+from ..core.whale_classifier import classify_whale, get_whale_tier
 from ..core.whale_detection import WhaleDetector
 from ..integrations.helius_client import HeliusClient
 from ..logging.session_logger import SessionLogger
@@ -217,7 +218,26 @@ class LiveProcessor:
             )
             if signal_event.signals:
                 self.session_logger.log_wallet_signal(signal_event)
-                self.renderer.add_wallet_signal(signal_event)
+                self.renderer.record_wallet_signal(signal_event)  # wallet panel only, no stream
+
+                # Upgrade 3: Route NEW ENTRY emergence signal
+                for we in whale_events:
+                    tier = get_whale_tier(ws)
+                    if tier >= 2:
+                        net_sol = ws.total_buy_sol - ws.total_sell_sol
+                        self.renderer.update_emergence_new_entry(
+                            1, tier, we.direction, net_sol, current_time
+                        )
+
+                # Upgrade 3: Route CLUSTER emergence signal
+                coord_details = signal_event.details.get("coordination")
+                if coord_details and coord_details.get("wallet_count", 0) >= 3:
+                    cluster_letter = chr(
+                        ord("A") + (self.token_state.current_wave - 1) % 26
+                    )
+                    self.renderer.update_emergence_cluster(
+                        cluster_letter, coord_details["wallet_count"], current_time
+                    )
         
         # EVENT-DRIVEN PATTERN DETECTION
         # EVENT TRIGGER 1: Wallet just traded (update activity metrics)
@@ -228,13 +248,31 @@ class LiveProcessor:
         # Check all wallets relative to this activity event
         self.pattern_detector.on_token_activity(self.token_state, current_time)
 
+        # Upgrade 3: Classify whale verdict on every flow (event-driven, cheap)
+        prev_verdict = ws.whale_verdict
+        ws.whale_verdict = classify_whale(ws, current_time, self.token_state)
+        ws.verdict_updated_at = current_time
+
+        # Detect FLIP transition for Emergence Layer
+        if prev_verdict in ("ACCUMULATING", "BUILDING") and ws.whale_verdict == "FLIPPING":
+            net_sol = ws.total_buy_sol - ws.total_sell_sol
+            self.renderer.update_emergence_flip(ws.address, net_sol, current_time)
+
         # Check exhaustion periodically (token-level)
         exhaust = self.signal_aggregator.check_exhaustion(
             self.token_state, current_time
         )
         if exhaust and exhaust.signals:
             self.session_logger.log_wallet_signal(exhaust)
-            self.renderer.add_wallet_signal(exhaust)
+            # Route to event stream as intelligence event (not wallet signal)
+            verdict = self.pattern_analyzer.analyze(self.token_state, current_time)
+            exhaust_pct = int(verdict.exhaustion_pct * 100) if verdict else 0
+            self.renderer.event_panel.add_exhaustion(
+                current_time, exhaust_pct, self.token_state.current_wave
+            )
+            # Route to emergence layer
+            silent_x, _, _ = self.token_state.compute_silent(current_time)
+            self.renderer.update_emergence_inactivity(silent_x, current_time)
 
         # Phase 3: Evaluate state transitions
         transition = self.state_machine.evaluate_transition(
