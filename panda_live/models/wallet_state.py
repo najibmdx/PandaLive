@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from collections import deque
-from typing import Set, Deque, Tuple
+from typing import List, Set, Deque, Tuple
 
 
 @dataclass
@@ -58,3 +58,11 @@ class WalletState:
     # Activity rate tracking for behavioral patterns
     trade_history: Deque[int] = field(default_factory=deque)  # Recent trades (5min)
     lifetime_trade_count: int = 0  # Total trades in episode
+
+    # Upgrade 3: Per-transaction direction+amount history for FLIPPING/delta_2m
+    # Each entry: (timestamp, direction, amount_sol) — capped at 20 entries
+    direction_history: Deque[Tuple[int, str, float]] = field(default_factory=deque)
+
+    # Upgrade 3: Whale classification verdict (computed on events, read by display)
+    whale_verdict: str = "INACTIVE"
+    verdict_updated_at: int = 0

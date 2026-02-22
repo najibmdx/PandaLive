@@ -100,10 +100,19 @@ class PatternAnalyzer:
         ]
         cohort_sequence.append(current_cohort)
 
-        # Sequence display string (e.g. "174->67->18->14")
+        # Sequence display string (e.g. "79→89→40→57→38→1")
         if len(cohort_sequence) > 1:
             seq_str = "\u2192".join(str(c) for c in cohort_sequence)
-            verdict.wave_trend_detail = f"{seq_str} ({current_wave} wave{'s' if current_wave > 1 else ''})"
+            # Peak anchor: identify peak wave and compute decay %
+            peak_val = max(cohort_sequence)
+            peak_wave = cohort_sequence.index(peak_val) + 1
+            current = cohort_sequence[-1]
+            if peak_val > 0 and current != peak_val:
+                decay_pct = int((1 - current / peak_val) * 100)
+                anchor = f"  |  peak W{peak_wave}:{peak_val}  (-{decay_pct}%)"
+            else:
+                anchor = ""
+            verdict.wave_trend_detail = f"{seq_str}{anchor}"
         else:
             verdict.wave_trend_detail = f"{current_cohort} wallets (wave {current_wave})"
 
