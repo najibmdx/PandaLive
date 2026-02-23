@@ -165,22 +165,25 @@ class TokenPanel:
         lines.append("")
 
         # --- COHORT block ---
-        if verdict and verdict.exhaustion_label:
-            cohort_label = verdict.exhaustion_detail if verdict.exhaustion_detail else f"Wave {wave} cohort forming"
-            if verdict.exhaustion_label not in ("NONE", ""):
-                lines.append(f" \u25c6 COHORT:       {verdict.exhaustion_label}")
-            else:
-                lines.append(f" \u25c6 COHORT:       Wave {wave} forming")
-            silent_x, silent_y, _ = token_state.compute_silent(current_time)
-            total_early = len(token_state.wave_early_wallets)
-            if total_early > 0:
-                pct = int(silent_x / total_early * 100) if total_early > 0 else 0
-                lines.append(f"   {silent_x}/{total_early} ({pct}%) early wallets silent")
-            else:
-                lines.append(f"   Wave {wave} cohort forming")
-        else:
+        # Rule: "Wave N forming" ONLY when wave_early_wallets is empty.
+        # Once cohort has members, always show exhaustion label + silent count.
+        total_early = len(token_state.wave_early_wallets)
+        if total_early == 0:
             lines.append(f" \u25c6 COHORT:       Wave {wave} forming")
             lines.append(f"   Wave {wave} cohort forming")
+        elif verdict and verdict.exhaustion_label:
+            lines.append(f" \u25c6 COHORT:       {verdict.exhaustion_label}")
+            # Count silent ONLY among wave early wallets (not all active wallets)
+            silent_count = sum(
+                1 for addr in token_state.wave_early_wallets
+                if addr in token_state.active_wallets
+                and token_state.active_wallets[addr].is_silent
+            )
+            pct = int(silent_count / total_early * 100)
+            lines.append(f"   {silent_count}/{total_early} ({pct}%) early wallets silent")
+        else:
+            lines.append(f" \u25c6 COHORT:       NONE")
+            lines.append(f"   0/{total_early} (0%) early wallets silent")
 
         # --- Blank ---
         lines.append("")

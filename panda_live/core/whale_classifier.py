@@ -80,20 +80,26 @@ def _momentum_confirms_sell(ws: WalletState, current_time: int) -> bool:
     """Momentum confirmation for FLIPPING detection.
 
     Weighted majority of last 3 transactions are sells
-    AND short-window net delta is negative.
+    AND short-window net delta is strictly negative.
+    Returns False on insufficient data — never flip on that alone.
     """
     recent = list(ws.direction_history)[-3:]
     if len(recent) < 2:
-        return False
+        return False  # insufficient data
 
     buy_weight = sum(amt for _, direction, amt in recent if direction == "buy")
     sell_weight = sum(amt for _, direction, amt in recent if direction == "sell")
 
     weighted_majority_sell = sell_weight > buy_weight
-    delta_2m = _compute_delta_2m(ws, current_time)
-    short_window_negative = delta_2m < 0
+    if not weighted_majority_sell:
+        return False
 
-    return weighted_majority_sell and short_window_negative
+    # Strictly negative — zero does NOT confirm a flip
+    delta_2m = _compute_delta_2m(ws, current_time)
+    if delta_2m >= 0:
+        return False
+
+    return True
 
 
 def _compute_delta_2m(ws: WalletState, current_time: int) -> float:
