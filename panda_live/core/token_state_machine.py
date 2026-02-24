@@ -157,6 +157,9 @@ class TokenStateMachine:
                     token_state, buy_density
                 )
                 if is_max:
+                    # Store PP details on token_state for entry signal (Upgrade 4)
+                    token_state.last_pp_buy_count = buy_count
+                    token_state.last_pp_buy_density = round(buy_density, 4)
                     return self._transition(
                         token_state,
                         "TOKEN_PRESSURE_PEAKING",

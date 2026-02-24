@@ -59,6 +59,13 @@ class EpisodeTracker:
         token_state.wave_history = []
         token_state.last_exhaustion_signaled_pct = 0.0
 
+        # Reset Upgrade 4 fields for new episode
+        token_state.entry_signal_fired = False
+        token_state.last_pp_buy_count = 0
+        token_state.last_pp_buy_density = 0.0
+        token_state.session_cliff_fired = False
+        token_state.session_peak_cohort = 0
+
     def check_reignition(
         self,
         token_state: TokenState,

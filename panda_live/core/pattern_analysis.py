@@ -38,6 +38,17 @@ class PatternVerdict:
     exhaustion_pct: float = 0.0                  # Current wave silent %
     exhaustion_detail: str = ""                  # e.g. "96% of wave 7 early cohort silent"
 
+    # Upgrade 4 — Entry signal (Change 1)
+    entry_signal: bool = False                   # True when entry window is live
+    entry_buyers: int = 0                        # buyer count at PRESSURE_PEAKING
+    entry_buy_density: float = 0.0               # density at PRESSURE_PEAKING
+
+    # Upgrade 4 — Cliff exit signal (Change 2)
+    cliff_detected: bool = False                 # True when current wave drop >= 60%
+    cliff_from: int = 0                          # Previous wave cohort
+    cliff_to: int = 0                            # Current wave cohort
+    cliff_drop_pct: int = 0                      # Integer percentage drop
+
     # Profile (placeholder — Upgrade 2.5)
     profile: str = "ANALYZING"                   # Always ANALYZING until 2.5
 
@@ -62,8 +73,11 @@ class PatternAnalyzer:
         verdict = PatternVerdict()
 
         self._compute_wave_trend(verdict, token_state)
+        self._compute_cliff(verdict, token_state)
+        self._compute_ghost_gate(verdict, token_state)
         self._compute_capital(verdict, token_state)
         self._compute_exhaustion(verdict, token_state, current_time)
+        self._compute_entry_signal(verdict, token_state)
         # profile stays "ANALYZING" — Upgrade 2.5
 
         return verdict
@@ -135,6 +149,86 @@ class PatternAnalyzer:
             verdict.wave_trend = "STABLE"
         else:
             verdict.wave_trend = "BUILDING"
+
+    def _compute_entry_signal(
+        self, verdict: PatternVerdict, token_state: TokenState
+    ) -> None:
+        """Surface entry signal on first PRESSURE_PEAKING in an episode.
+
+        Fires ONCE per episode — after the first PP transition, sets
+        entry_signal_fired on token_state so subsequent PP cycles are silent.
+        """
+        if token_state.current_state != "TOKEN_PRESSURE_PEAKING":
+            return
+        if token_state.entry_signal_fired:
+            return
+
+        verdict.entry_signal = True
+        verdict.entry_buyers = token_state.last_pp_buy_count
+        verdict.entry_buy_density = token_state.last_pp_buy_density
+        token_state.entry_signal_fired = True
+
+    def _compute_cliff(
+        self, verdict: PatternVerdict, token_state: TokenState
+    ) -> None:
+        """Detect structural cliff when wave cohort drops >= 60%.
+
+        Compares the last two entries in wave_history (completed waves).
+        Also tracks session peak cohort for ghost wave gating.
+        """
+        history = token_state.wave_history
+        if len(history) < 2:
+            # Track session peak even with single wave
+            for wr in history:
+                if wr.early_wallet_count > token_state.session_peak_cohort:
+                    token_state.session_peak_cohort = wr.early_wallet_count
+            return
+
+        prev_cohort = history[-2].early_wallet_count
+        curr_cohort = history[-1].early_wallet_count
+
+        if prev_cohort > 0:
+            drop_pct = (prev_cohort - curr_cohort) / prev_cohort
+            if drop_pct >= 0.60:
+                verdict.cliff_detected = True
+                verdict.cliff_from = prev_cohort
+                verdict.cliff_to = curr_cohort
+                verdict.cliff_drop_pct = int(drop_pct * 100)
+                verdict.wave_trend = "COLLAPSING"
+                token_state.session_cliff_fired = True
+
+        # Track session peak across all waves
+        for wr in history:
+            if wr.early_wallet_count > token_state.session_peak_cohort:
+                token_state.session_peak_cohort = wr.early_wallet_count
+
+    def _compute_ghost_gate(
+        self, verdict: PatternVerdict, token_state: TokenState
+    ) -> None:
+        """Gate false BUILDING signals after a cliff has fired.
+
+        After the first cliff in a session, any wave where the cohort is
+        below 30% of session peak should display GHOST instead of BUILDING.
+        """
+        if not token_state.session_cliff_fired:
+            return
+
+        peak = token_state.session_peak_cohort
+        if peak == 0:
+            return
+
+        # Get current cohort from the same sequence used by _compute_wave_trend
+        history = token_state.wave_history
+        current_cohort = len(token_state.wave_early_wallets)
+        cohort_sequence = [wr.early_wallet_count for wr in history]
+        cohort_sequence.append(current_cohort)
+
+        current = cohort_sequence[-1] if cohort_sequence else 0
+        ghost_threshold = peak * 0.30
+
+        if current < ghost_threshold and verdict.wave_trend == "BUILDING":
+            verdict.wave_trend = "GHOST"
+            verdict.wave_trend_detail += f"  [below 30% of peak={peak}]"
 
     def _compute_capital(
         self, verdict: PatternVerdict, token_state: TokenState
