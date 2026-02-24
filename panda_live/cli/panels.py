@@ -441,8 +441,10 @@ class EventPanel:
         )
         sev = transition.details.get("severity", "")
         sev_str = f"  [{sev}]" if sev else ""
-        # Upgrade 4 — replace "whale"/"whales" in trigger display (Change 4)
-        trigger_display = transition.trigger.replace("whales", "buyers").replace("whale", "buyer")
+        # Upgrade 4 — sanitize trigger for display (Change 4).
+        # Trigger is not currently shown in event stream, but sanitized form
+        # is ready if display format is later expanded to include it.
+        _trigger_display = transition.trigger.replace("whales", "buyers").replace("whale", "buyer")  # noqa: F841
         self._maybe_add_quiet_marker(transition.timestamp)
         self._append(f"[{ts}] \u25c6 {from_phase} \u2192 {to_phase}{sev_str}")
 
