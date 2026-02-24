@@ -55,6 +55,15 @@ class TokenState:
     buy_tx_count: int = 0               # Total buy transactions
     sell_tx_count: int = 0              # Total sell transactions
 
+    # Upgrade 4 — Entry signal tracking (Change 1)
+    entry_signal_fired: bool = False        # True after first PRESSURE_PEAKING in episode
+    last_pp_buy_count: int = 0              # buy_whale_count from most recent PP transition
+    last_pp_buy_density: float = 0.0        # buy_density from most recent PP transition
+
+    # Upgrade 4 — Cliff/ghost tracking (Changes 2, 3)
+    session_cliff_fired: bool = False       # True after first cliff in session
+    session_peak_cohort: int = 0            # Highest cohort seen across all waves
+
     def compute_silent(self, current_time: int) -> Tuple[int, int, float]:
         """Compute silent X/Y/pct using EVENT-DRIVEN pattern detection.
         

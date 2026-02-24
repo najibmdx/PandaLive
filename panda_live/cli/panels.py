@@ -133,11 +133,28 @@ class TokenPanel:
 
         # --- CONVICTION block ---
         if verdict:
-            lines.append(f" \u25c6 CONVICTION:   {verdict.wave_trend}")
-            lines.append(f"   {verdict.wave_trend_detail}")
+            if verdict.cliff_detected:
+                # Cliff overrides normal wave_trend display (Change 2)
+                lines.append(
+                    f" \U0001f534 STRUCTURE BROKEN \u2014 EXIT"
+                    f" | {verdict.cliff_from}\u2192{verdict.cliff_to}"
+                    f" (-{verdict.cliff_drop_pct}%)"
+                )
+                lines.append(f"   {verdict.wave_trend_detail}")
+            else:
+                lines.append(f" \u25c6 CONVICTION:   {verdict.wave_trend}")
+                lines.append(f"   {verdict.wave_trend_detail}")
         else:
             lines.append(" \u25c6 CONVICTION:   ANALYZING")
             lines.append("   Waiting for wave data...")
+
+        # --- Entry signal (Change 1) ---
+        if verdict and verdict.entry_signal:
+            lines.append(
+                f" \u26a1 ENTRY WINDOW"
+                f" | Buyers: {verdict.entry_buyers}"
+                f" | Pressure: {verdict.entry_buy_density:.2f}/s"
+            )
 
         # --- Blank ---
         lines.append("")
@@ -196,7 +213,7 @@ class TokenPanel:
             duration_s = peak_record.end_time - peak_record.start_time
             lines.append(
                 f"   W{peak_record.wave_id}: density {peak_record.peak_density:.4f}"
-                f"  |  {peak_record.peak_buy_whale_count} buy whales  |  {duration_s}s"
+                f"  |  {peak_record.peak_buy_whale_count} buyers  |  {duration_s}s"
             )
             # Current density from live window
             buy_wallets = {e[1] for e in token_state.whale_events_2min if e[2] == "buy"}
@@ -229,7 +246,7 @@ class TokenPanel:
         )
         tx_ago = f"{current_time - last_tx_ts}s" if last_tx_ts > 0 else "-"
         active = len(token_state.active_wallets)
-        lines.append(f"   Whale: {whale_ago}   Tx: {tx_ago}   Active: {active}")
+        lines.append(f"   Active: {whale_ago}   Tx: {tx_ago}   Wallets: {active}")
 
         early_count = len(token_state.early_wallets)
         early_pct = f"({early_count * 100 // active}%)" if active > 0 else "(0%)"
@@ -293,8 +310,8 @@ class WalletPanel:
             else int(time.time())
         )
 
-        # ═══ WHALE WATCH (Capital Layer) ═══
-        lines.append(" WHALE WATCH \u2500 Capital Layer")
+        # ═══ CAPITAL WATCH (Capital Layer) ═══
+        lines.append(" CAPITAL WATCH \u2500 Capital Layer")
         lines.append("")
 
         # Collect whales with verdicts
@@ -331,7 +348,7 @@ class WalletPanel:
             whale_rendered += 1
 
         if whale_rendered == 0:
-            lines.append("   No whales detected yet")
+            lines.append("   No active wallets detected yet")
             lines.append("")
 
         # Separator
@@ -424,6 +441,8 @@ class EventPanel:
         )
         sev = transition.details.get("severity", "")
         sev_str = f"  [{sev}]" if sev else ""
+        # Upgrade 4 — replace "whale"/"whales" in trigger display (Change 4)
+        trigger_display = transition.trigger.replace("whales", "buyers").replace("whale", "buyer")
         self._maybe_add_quiet_marker(transition.timestamp)
         self._append(f"[{ts}] \u25c6 {from_phase} \u2192 {to_phase}{sev_str}")
 
