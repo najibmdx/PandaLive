@@ -22,7 +22,6 @@ import queue
 import random
 import threading
 import time
-from collections import deque
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -66,20 +65,9 @@ class ListenerState:
             "owner_rpc_calls": 0,
             "owner_cache_hits": 0,
             "errors_count": 0,
-            "priority_spikes": 0,
-            "extreme_priority_spikes": 0,
-            "total_buys": 0,
-            "total_sells": 0,
-            "burst_events": 0,
-            "cluster_events": 0,
-            "large_sol_moves": 0,
         }
         self.audit_lock = threading.Lock()
 
-        self.last_60s_trades = deque()
-        self.last_trade_timestamp: Optional[float] = None
-        self.cluster_count = 0
-        self.trade_lock = threading.Lock()
 
 
 def utc_now_iso() -> str:
@@ -434,21 +422,6 @@ def enrich_transaction(
             post_sol = _to_decimal_sol(post_lamports)
             delta_sol = _to_decimal_sol(d_lamports)
 
-    spl_in_count = len(spl_in)
-    spl_out_count = len(spl_out)
-    sol_delta_float = None
-    try:
-        sol_delta_float = float(delta_sol) if delta_sol is not None else None
-    except Exception:
-        sol_delta_float = None
-
-    if spl_in_count > 0 and sol_delta_float is not None and sol_delta_float < 0:
-        trade_type = "BUY"
-    elif spl_out_count > 0 and sol_delta_float is not None and sol_delta_float > 0:
-        trade_type = "SELL"
-    else:
-        trade_type = "OTHER"
-
     enriched = {
         "scan_wallet": wallet,
         "wallet_owner": wallet_owner,
@@ -469,9 +442,6 @@ def enrich_transaction(
         "pre_balance_SOL": pre_sol,
         "post_balance_SOL": post_sol,
         "balance_delta_SOL": delta_sol,
-        "trade_type": trade_type,
-        "trades_last_60s": 0,
-        "cluster_count": 0,
         "tx": tx,
     }
     return enriched
@@ -510,78 +480,21 @@ def process_signature(state: ListenerState, rpc: RpcClient, signature: str, obse
         state.audit["last_write_utc"] = utc_now_iso()
     
     cb_micro = enriched.get("computeBudget_microLamports")
-    trade_type = enriched.get("trade_type") or "OTHER"
     sol_delta = enriched.get("balance_delta_SOL")
     spl_in_count = len(enriched.get("spl_in_transfers") or [])
     spl_out_count = len(enriched.get("spl_out_transfers") or [])
 
-    now_ts = time.time()
-    trades_last_60s = 0
-    cluster_count = 0
-    with state.trade_lock:
-        if trade_type in {"BUY", "SELL"}:
-            state.last_60s_trades.append(now_ts)
-        while state.last_60s_trades and (now_ts - state.last_60s_trades[0]) > 60:
-            state.last_60s_trades.popleft()
-        trades_last_60s = len(state.last_60s_trades)
-
-        if trade_type in {"BUY", "SELL"}:
-            if state.last_trade_timestamp is not None and abs(now_ts - state.last_trade_timestamp) <= 2:
-                state.cluster_count += 1
-            else:
-                state.cluster_count = 1
-            state.last_trade_timestamp = now_ts
-            cluster_count = state.cluster_count
-        else:
-            cluster_count = state.cluster_count
-
-    enriched["trades_last_60s"] = trades_last_60s
-    enriched["cluster_count"] = cluster_count
-
     append_jsonl(state.out_path, enriched)
 
     with state.audit_lock:
-        if isinstance(cb_micro, int) and cb_micro > 500000:
-            state.audit["priority_spikes"] += 1
-        if isinstance(cb_micro, int) and cb_micro > 2000000:
-            state.audit["extreme_priority_spikes"] += 1
-        if trade_type == "BUY":
-            state.audit["total_buys"] += 1
-        elif trade_type == "SELL":
-            state.audit["total_sells"] += 1
-        if trades_last_60s >= 5:
-            state.audit["burst_events"] += 1
-        if cluster_count >= 3:
-            state.audit["cluster_events"] += 1
-        try:
-            if sol_delta is not None and abs(float(sol_delta)) >= 5:
-                state.audit["large_sol_moves"] += 1
-        except Exception:
-            pass
         audit_snapshot = dict(state.audit)
     atomic_write_json(state.audit_path, audit_snapshot)
 
-    if isinstance(cb_micro, int) and cb_micro > 2000000:
-        print(f"🚨 EXTREME PRIORITY {short_sig(signature)} uL={cb_micro}", flush=True)
-    elif isinstance(cb_micro, int) and cb_micro > 500000:
-        print(f"🔴 PRIORITY SPIKE {short_sig(signature)} uL={cb_micro}", flush=True)
-
-    if trades_last_60s >= 5:
-        print(f"⚡ BURST DETECTED: {trades_last_60s} trades in 60s", flush=True)
-
-    if cluster_count >= 3:
-        print(f"🐋 CLUSTER BURST x{cluster_count}", flush=True)
-
-    try:
-        if sol_delta is not None and abs(float(sol_delta)) >= 5:
-            print(f"💰 LARGE SOL MOVE: {sol_delta}", flush=True)
-    except Exception:
-        pass
-
+    err_flag = "yes" if enriched.get("err") else "no"
     print(
-        f"{observed_utc} {trade_type} {short_sig(signature)} slot={enriched.get('slot')} "
-        f"fee={enriched.get('fee_lamports')} uL={cb_micro} sol={sol_delta} "
-        f"in={spl_in_count} out={spl_out_count} 60s={trades_last_60s} cluster={cluster_count}",
+        f"{observed_utc} {short_sig(signature)} slot={enriched.get('slot')} "
+        f"fee={enriched.get('fee_lamports')} uL={cb_micro} err={err_flag} "
+        f"in={spl_in_count} out={spl_out_count} sol={sol_delta}",
         flush=True,
     )
 
@@ -595,7 +508,6 @@ def worker_loop(state: ListenerState, rpc: RpcClient) -> None:
             with state.audit_lock:
                 state.audit["errors_count"] += 1
             update_audit(state)
-            print(f"[warn] failed to process {short_sig(sig)}: {e}", flush=True)
 
 
 def enqueue_signature(state: ListenerState, signature: Optional[str], observed_utc: Optional[str] = None) -> None:
@@ -640,7 +552,6 @@ def try_ws_listen_with_websocket_client(state: ListenerState, ws_url: str, walle
                 state.audit["ws_reconnects"] += 1
                 state.audit["errors_count"] += 1
             update_audit(state)
-            print(f"[warn] websocket-client reconnect {attempt}: {e}", flush=True)
             backoff_sleep(attempt)
             continue
     return False
@@ -681,14 +592,12 @@ def try_ws_listen_with_websockets(state: ListenerState, ws_url: str, wallet: str
                 state.audit["ws_reconnects"] += 1
                 state.audit["errors_count"] += 1
             update_audit(state)
-            print(f"[warn] websockets reconnect {attempt}: {e}", flush=True)
             backoff_sleep(attempt)
             continue
     return False
 
 
 def polling_loop(state: ListenerState, rpc: RpcClient) -> None:
-    print("[info] entering polling mode", flush=True)
     while True:
         try:
             rows = rpc.get_signatures_for_address(state.wallet, limit=50)
@@ -700,7 +609,6 @@ def polling_loop(state: ListenerState, rpc: RpcClient) -> None:
             with state.audit_lock:
                 state.audit["errors_count"] += 1
             update_audit(state)
-            print(f"[warn] polling iteration failed: {e}", flush=True)
         time.sleep(1.0)
 
 
@@ -769,18 +677,6 @@ def main() -> None:
     worker = threading.Thread(target=worker_loop, args=(state, rpc), daemon=True)
     worker.start()
 
-    mode = "Polling" if args.poll else ("WebSocket" if args.ws or not args.poll else "Polling")
-    print("--------------------------------------------------", flush=True)
-    print("LIVE WALLET LISTENER STARTED", flush=True)
-    print(f"Wallet: {wallet}", flush=True)
-    print(f"Owner: {wallet_owner}", flush=True)
-    print(f"Mode: {mode}", flush=True)
-    print(f"Output: {state.out_path}", flush=True)
-    print("--------------------------------------------------", flush=True)
-    print(f"[info] rpc={rpc_url}", flush=True)
-    print(f"[info] ws={ws_url}", flush=True)
-    print(f"[info] loaded_seen={len(state.seen)}", flush=True)
-
     if args.poll:
         polling_loop(state, rpc)
         return
@@ -792,7 +688,6 @@ def main() -> None:
             ws_ok = try_ws_listen_with_websockets(state, ws_url, wallet)
 
     if not ws_ok:
-        print("[warn] websocket unavailable after retries; switching to polling", flush=True)
         polling_loop(state, rpc)
 
 
