@@ -14,10 +14,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 LAMPORTS_PER_SOL = 1_000_000_000
 
-FLOW_IN = {"IN", "BUY"}
-FLOW_OUT = {"OUT", "SELL"}
-SOL_IN = {"IN"}
-SOL_OUT = {"OUT"}
+TOKEN_IN_DIRS = {"in", "buy", "b"}
+TOKEN_OUT_DIRS = {"out", "sell", "s"}
+SOL_IN_DIRS = {"in", "sell", "s"}
+SOL_OUT_DIRS = {"out", "buy", "b"}
 
 
 class ReconstructionError(RuntimeError):
@@ -77,23 +77,22 @@ def load_schema(conn: sqlite3.Connection) -> Dict[str, List[str]]:
 
 
 def find_col(cols: Sequence[str], name: str) -> Optional[str]:
-    lower = {c.lower(): c for c in cols}
-    return lower.get(name.lower())
+    by_lower = {c.lower(): c for c in cols}
+    return by_lower.get(name.lower())
 
 
 def require_cols(table: str, cols: Sequence[str], required: Sequence[str]) -> Dict[str, str]:
     mapped: Dict[str, str] = {}
-    missing = []
-    for r in required:
-        c = find_col(cols, r)
+    missing: List[str] = []
+    for req in required:
+        c = find_col(cols, req)
         if c is None:
-            missing.append(r)
+            missing.append(req)
         else:
-            mapped[r] = c
+            mapped[req] = c
     if missing:
         raise ReconstructionError(
-            f"Table {table} is present but missing required columns for reconstruction: {missing}. "
-            f"Found columns: {list(cols)}"
+            f"Table {table} is present but missing required columns: {missing}. Found: {list(cols)}"
         )
     return mapped
 
@@ -154,26 +153,15 @@ def detect_source(schema: Dict[str, List[str]]) -> SourceSpec:
         )
 
     raise ReconstructionError(
-        "Neither wallet_token_flow (primary) nor swaps (fallback) table was found. "
+        "Neither wallet_token_flow (primary) nor swaps (fallback) found. "
         f"Tables found: {sorted(schema.keys())}"
     )
 
 
-def parse_int(val: object, field: str, samples: List[str], row_id: str) -> int:
+def normalize_dir(val: object) -> Optional[str]:
     if val is None:
-        samples.append(f"{row_id}:{field}=NULL")
-        raise ReconstructionError(f"NULL in required numeric field {field}. Samples: {samples[:5]}")
-    try:
-        return int(val)
-    except Exception:
-        samples.append(f"{row_id}:{field}={val}")
-        raise ReconstructionError(f"Invalid integer in field {field}. Samples: {samples[:5]}")
-
-
-def normalize_dir(value: object) -> Optional[str]:
-    if value is None:
         return None
-    return str(value).strip().upper()
+    return str(val).strip().lower()
 
 
 def build_time_bounds(
@@ -188,6 +176,7 @@ def build_time_bounds(
         return time_min, time_max
     if window_hours is None:
         return None, None
+
     q = (
         f"SELECT MAX({qident(source.ts_col)}) FROM {qident(source.table)} "
         f"WHERE {qident(source.wallet_col)} = ?"
@@ -199,15 +188,9 @@ def build_time_bounds(
     return max_ts - (window_hours * 3600), max_ts
 
 
-def fetch_rows(
-    conn: sqlite3.Connection,
-    source: SourceSpec,
-    wallet: str,
-    time_min: Optional[int],
-    time_max: Optional[int],
-) -> Iterable[sqlite3.Row]:
+def where_wallet_time(source: SourceSpec, time_min: Optional[int], time_max: Optional[int]) -> Tuple[str, List[object]]:
     where = [f"{qident(source.wallet_col)} = ?"]
-    params: List[object] = [wallet]
+    params: List[object] = []
     if time_min is not None:
         where.append(f"{qident(source.ts_col)} >= ?")
         params.append(time_min)
@@ -216,77 +199,163 @@ def fetch_rows(
         params.append(time_max)
     if source.mode == "swaps":
         where.append(f"COALESCE({qident(source.has_sol_leg_col)}, 0) = 1")
+    return " AND ".join(where), params
 
-    q = f"SELECT * FROM {qident(source.table)} WHERE {' AND '.join(where)} ORDER BY {qident(source.ts_col)} ASC"
+
+def fetch_rows(
+    conn: sqlite3.Connection,
+    source: SourceSpec,
+    wallet: str,
+    time_min: Optional[int],
+    time_max: Optional[int],
+) -> Iterable[sqlite3.Row]:
+    where_sql, extra = where_wallet_time(source, time_min, time_max)
+    params = [wallet, *extra]
+    q = f"SELECT * FROM {qident(source.table)} WHERE {where_sql} ORDER BY {qident(source.ts_col)} ASC"
     for row in conn.execute(q, params):
         yield row
 
 
-def derive_event_wallet_token_flow(row: sqlite3.Row, source: SourceSpec, bad_flow: List[str], bad_sol: List[str]) -> Event:
+def fetch_direction_enums(
+    conn: sqlite3.Connection,
+    source: SourceSpec,
+    wallet: str,
+    time_min: Optional[int],
+    time_max: Optional[int],
+) -> Tuple[List[str], List[str]]:
+    where_sql, extra = where_wallet_time(source, time_min, time_max)
+    params = [wallet, *extra]
+
+    flow_vals: List[str] = []
+    if source.flow_direction_col is not None:
+        qf = (
+            f"SELECT DISTINCT lower(trim({qident(source.flow_direction_col)})) AS v "
+            f"FROM {qident(source.table)} WHERE {where_sql} ORDER BY v"
+        )
+        flow_vals = [r[0] for r in conn.execute(qf, params).fetchall() if r[0] is not None]
+
+    qs = (
+        f"SELECT DISTINCT lower(trim({qident(source.sol_direction_col)})) AS v "
+        f"FROM {qident(source.table)} WHERE {where_sql} ORDER BY v"
+    )
+    sol_vals = [r[0] for r in conn.execute(qs, params).fetchall() if r[0] is not None]
+    return flow_vals, sol_vals
+
+
+def sample_rows_for_error(
+    conn: sqlite3.Connection,
+    source: SourceSpec,
+    wallet: str,
+    time_min: Optional[int],
+    time_max: Optional[int],
+    bad_field: str,
+) -> List[str]:
+    where_sql, extra = where_wallet_time(source, time_min, time_max)
+    params = [wallet, *extra]
+    if bad_field == "flow_direction":
+        bad_condition = (
+            f"lower(trim({qident(source.flow_direction_col)})) NOT IN ('in','buy','b','out','sell','s') "
+            f"OR {qident(source.flow_direction_col)} IS NULL"
+        )
+    else:
+        bad_condition = (
+            f"({qident(source.sol_direction_col)} IS NOT NULL AND "
+            f"lower(trim({qident(source.sol_direction_col)})) NOT IN ('in','sell','s','out','buy','b'))"
+        )
+
+    fields = [
+        "signature" if find_col(table_columns(conn, source.table), "signature") else None,
+        source.ts_col,
+        source.mint_col,
+        source.token_amount_col,
+        source.flow_direction_col if source.flow_direction_col is not None else None,
+        source.sol_direction_col,
+        source.sol_amount_col,
+    ]
+    fields = [f for f in fields if f is not None]
+    select = ", ".join(f"{qident(f)}" for f in fields)
+    q = (
+        f"SELECT {select} FROM {qident(source.table)} WHERE {where_sql} AND ({bad_condition}) "
+        f"ORDER BY {qident(source.ts_col)} ASC LIMIT 10"
+    )
+    out: List[str] = []
+    for row in conn.execute(q, params):
+        vals = []
+        for f in fields:
+            vals.append(f"{f}={row[f]}")
+        out.append("; ".join(vals))
+    return out
+
+
+def derive_event_wallet_token_flow(
+    row: sqlite3.Row,
+    source: SourceSpec,
+) -> Tuple[Event, bool]:
     row_id = str(row["signature"]) if "signature" in row.keys() and row["signature"] is not None else f"ts={row[source.ts_col]}"
+    ts = int(row[source.ts_col])
+    mint = str(row[source.mint_col])
+    token_amt = int(row[source.token_amount_col])
 
     flow_dir = normalize_dir(row[source.flow_direction_col])
-    sol_dir = normalize_dir(row[source.sol_direction_col])
-
-    ts = int(row[source.ts_col])
-    mint = str(row[source.mint_col])
-    token_amt = int(row[source.token_amount_col])
-
-    if flow_dir in FLOW_IN:
+    if flow_dir in TOKEN_IN_DIRS:
         token_delta_raw = token_amt
-    elif flow_dir in FLOW_OUT:
+    elif flow_dir in TOKEN_OUT_DIRS:
         token_delta_raw = -token_amt
     else:
-        bad_flow.append(f"{row_id}:flow_direction={row[source.flow_direction_col]}")
-        raise ReconstructionError(
-            "Unsupported flow_direction values in wallet_token_flow. "
-            f"Examples: {bad_flow[:5]}"
-        )
+        raise ReconstructionError(f"Unsupported flow_direction value encountered in row {row_id}: {row[source.flow_direction_col]}")
 
+    sol_dir = normalize_dir(row[source.sol_direction_col])
     lamports_raw = row[source.sol_amount_col]
-    if sol_dir in SOL_IN:
-        lamports = int(lamports_raw) if lamports_raw is not None else 0
-        sol_delta_lamports = lamports
-    elif sol_dir in SOL_OUT:
-        lamports = int(lamports_raw) if lamports_raw is not None else 0
-        sol_delta_lamports = -lamports
-    else:
-        bad_sol.append(f"{row_id}:sol_direction={row[source.sol_direction_col]},sol_amount={lamports_raw}")
-        raise ReconstructionError(
-            "Unsupported or missing sol_direction values in wallet_token_flow. "
-            f"Examples: {bad_sol[:5]}"
+
+    if sol_dir in SOL_IN_DIRS:
+        sol_delta_lamports = int(lamports_raw) if lamports_raw is not None else 0
+        return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=sol_delta_lamports, row_id=row_id), (
+            lamports_raw is None
+        )
+    if sol_dir in SOL_OUT_DIRS:
+        sol_delta_lamports = -(int(lamports_raw) if lamports_raw is not None else 0)
+        return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=sol_delta_lamports, row_id=row_id), (
+            lamports_raw is None
         )
 
-    return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=sol_delta_lamports, row_id=row_id)
+    if sol_dir is None and lamports_raw is not None:
+        # Required anomaly treatment: keep event with 0 SOL delta.
+        return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=0, row_id=row_id), False
+
+    raise ReconstructionError(
+        f"Unsupported sol_direction value encountered in row {row_id}: sol_direction={row[source.sol_direction_col]} sol_amount_lamports={lamports_raw}"
+    )
 
 
-def derive_event_swaps(row: sqlite3.Row, source: SourceSpec, bad_sol: List[str]) -> Event:
+def derive_event_swaps(row: sqlite3.Row, source: SourceSpec) -> Tuple[Event, bool]:
     row_id = str(row["signature"]) if "signature" in row.keys() and row["signature"] is not None else f"ts={row[source.ts_col]}"
-
-    sol_dir = normalize_dir(row[source.sol_direction_col])
     ts = int(row[source.ts_col])
     mint = str(row[source.mint_col])
     token_amt = int(row[source.token_amount_col])
+
+    sol_dir = normalize_dir(row[source.sol_direction_col])
     lamports_raw = row[source.sol_amount_col]
 
-    if sol_dir in SOL_OUT:
-        # spent SOL => bought token
+    if sol_dir in SOL_OUT_DIRS:
         token_delta_raw = token_amt
-        lamports = int(lamports_raw) if lamports_raw is not None else 0
-        sol_delta_lamports = -lamports
-    elif sol_dir in SOL_IN:
-        # received SOL => sold token
+        sol_delta_lamports = -(int(lamports_raw) if lamports_raw is not None else 0)
+        return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=sol_delta_lamports, row_id=row_id), (
+            lamports_raw is None
+        )
+    if sol_dir in SOL_IN_DIRS:
         token_delta_raw = -token_amt
-        lamports = int(lamports_raw) if lamports_raw is not None else 0
-        sol_delta_lamports = lamports
-    else:
-        bad_sol.append(f"{row_id}:sol_direction={row[source.sol_direction_col]},sol_amount={lamports_raw}")
-        raise ReconstructionError(
-            "Unsupported or missing sol_direction values in swaps fallback. "
-            f"Examples: {bad_sol[:5]}"
+        sol_delta_lamports = int(lamports_raw) if lamports_raw is not None else 0
+        return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=sol_delta_lamports, row_id=row_id), (
+            lamports_raw is None
         )
 
-    return Event(ts=ts, mint=mint, token_delta_raw=token_delta_raw, sol_delta_lamports=sol_delta_lamports, row_id=row_id)
+    if sol_dir is None and lamports_raw is not None:
+        # required anomaly treatment
+        return Event(ts=ts, mint=mint, token_delta_raw=0, sol_delta_lamports=0, row_id=row_id), False
+
+    raise ReconstructionError(
+        f"Unsupported sol_direction value encountered in swaps row {row_id}: sol_direction={row[source.sol_direction_col]} sol_amount_lamports={lamports_raw}"
+    )
 
 
 def percentile(values: Sequence[float], p: float) -> Optional[float]:
@@ -323,37 +392,42 @@ def print_inspect(schema: Dict[str, List[str]]) -> None:
     print("Detected tables/columns:")
     for t in sorted(schema):
         print(f"- {t}: {', '.join(schema[t])}")
-
     print("\nSource detection:")
-    if "wallet_token_flow" in schema:
-        print("- wallet_token_flow found (primary source candidate)")
-    else:
-        print("- wallet_token_flow not found")
-    if "swaps" in schema:
-        print("- swaps found (fallback source candidate)")
-    else:
-        print("- swaps not found")
+    print("- wallet_token_flow found" if "wallet_token_flow" in schema else "- wallet_token_flow not found")
+    print("- swaps found" if "swaps" in schema else "- swaps not found")
+
+
+def fail_with_schema_and_enums(schema: Dict[str, List[str]], flow_vals: List[str], sol_vals: List[str], msg: str) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    print(f"Direction enums: flow_direction={flow_vals} sol_direction={sol_vals}", file=sys.stderr)
+    print("Schema summary:", file=sys.stderr)
+    for t in sorted(schema):
+        print(f"- {t}: {', '.join(schema[t])}", file=sys.stderr)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Reconstruct token trades for a wallet from SQLite swap cashflows")
-    p.add_argument("--db", required=True)
-    p.add_argument("--wallet", required=True)
-    p.add_argument("--outdir", required=True)
-    p.add_argument("--time-min", type=int)
-    p.add_argument("--time-max", type=int)
-    p.add_argument("--window-hours", type=int)
-    p.add_argument("--verbose", action="store_true")
-    p.add_argument("--inspect", action="store_true")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="Reconstruct token trades for a wallet from SQLite swap cashflows")
+    parser.add_argument("--db", required=True)
+    parser.add_argument("--wallet", required=True)
+    parser.add_argument("--outdir", required=True)
+    parser.add_argument("--time-min", type=int)
+    parser.add_argument("--time-max", type=int)
+    parser.add_argument("--window-hours", type=int)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--inspect", action="store_true")
+    parser.add_argument("--dump-enum", action="store_true")
+    args = parser.parse_args()
 
-    db = Path(args.db)
-    if not db.exists():
-        raise SystemExit(f"ERROR: DB path does not exist: {db}")
+    db_path = Path(args.db)
+    if not db_path.exists():
+        raise SystemExit(f"ERROR: DB path does not exist: {db_path}")
 
-    conn = sqlite3.connect(f"file:{db.resolve()}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
+    schema: Dict[str, List[str]] = {}
+    flow_vals: List[str] = []
+    sol_vals: List[str] = []
     try:
         schema = load_schema(conn)
         if args.inspect:
@@ -362,8 +436,17 @@ def main() -> None:
 
         source = detect_source(schema)
         time_min, time_max = build_time_bounds(conn, source, args.wallet, args.time_min, args.time_max, args.window_hours)
+
+        flow_vals, sol_vals = fetch_direction_enums(conn, source, args.wallet, time_min, time_max)
         if args.verbose:
             print(f"Using source={source.table} mode={source.mode} time_min={time_min} time_max={time_max}")
+            print(f"Enum flow_direction={flow_vals}")
+            print(f"Enum sol_direction={sol_vals}")
+
+        if args.dump_enum:
+            print(f"flow_direction: {flow_vals}")
+            print(f"sol_direction: {sol_vals}")
+            return
 
         by_mint: Dict[str, TradeAgg] = {}
         sell_without_buy: set[str] = set()
@@ -373,20 +456,25 @@ def main() -> None:
         buy_events = 0
         sell_events = 0
         anomaly_events = 0
-        null_sol_amount_with_dir = 0
-
-        bad_flow_examples: List[str] = []
-        bad_sol_examples: List[str] = []
+        null_sol_amount_with_direction = 0
+        null_sol_direction_with_amount = 0
 
         for row in fetch_rows(conn, source, args.wallet, time_min, time_max):
             total_events += 1
-            if source.mode == "wallet_token_flow":
-                ev = derive_event_wallet_token_flow(row, source, bad_flow_examples, bad_sol_examples)
-            else:
-                ev = derive_event_swaps(row, source, bad_sol_examples)
+            try:
+                if source.mode == "wallet_token_flow":
+                    ev, had_null_amount = derive_event_wallet_token_flow(row, source)
+                else:
+                    ev, had_null_amount = derive_event_swaps(row, source)
+            except ReconstructionError as e:
+                bad_field = "flow_direction" if "flow_direction" in str(e) else "sol_direction"
+                examples = sample_rows_for_error(conn, source, args.wallet, time_min, time_max, bad_field)
+                raise ReconstructionError(str(e) + f". Example rows: {examples}")
 
-            if row[source.sol_amount_col] is None and row[source.sol_direction_col] is not None:
-                null_sol_amount_with_dir += 1
+            if had_null_amount:
+                null_sol_amount_with_direction += 1
+            if row[source.sol_direction_col] is None and row[source.sol_amount_col] is not None:
+                null_sol_direction_with_amount += 1
 
             agg = by_mint.get(ev.mint)
             if agg is None:
@@ -446,23 +534,25 @@ def main() -> None:
                 hold_closed.append(float(hold))
                 entry_closed.append(t.entry_sol)
 
-            trades_rows.append([
-                mint,
-                status,
-                t.entry_time if t.entry_time is not None else "",
-                t.exit_time if t.exit_time is not None else "",
-                hold if hold is not None else "",
-                fmt_num(t.entry_sol),
-                fmt_num(t.exit_sol),
-                fmt_num(net_sol),
-                fmt_num(roi),
-                t.buys_count,
-                t.sells_count,
-                t.buys_count,
-                t.sells_count,
-                t.first_ts,
-                t.last_ts,
-            ])
+            trades_rows.append(
+                [
+                    mint,
+                    status,
+                    t.entry_time if t.entry_time is not None else "",
+                    t.exit_time if t.exit_time is not None else "",
+                    hold if hold is not None else "",
+                    fmt_num(t.entry_sol),
+                    fmt_num(t.exit_sol),
+                    fmt_num(net_sol),
+                    fmt_num(roi),
+                    t.buys_count,
+                    t.sells_count,
+                    t.buys_count,
+                    t.sells_count,
+                    t.first_ts,
+                    t.last_ts,
+                ]
+            )
 
         outdir = Path(args.outdir)
         outdir.mkdir(parents=True, exist_ok=True)
@@ -536,20 +626,20 @@ def main() -> None:
             fh.write(f"expectancy_per_trade\t{fmt_num(expectancy)}\n")
 
             fh.write("ROI_percentiles\n")
-            for p in [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
-                fh.write(f"p{int(p*100)}\t{fmt_num(roi_ps[p], 6)}\n")
+            for pp in [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
+                fh.write(f"p{int(pp * 100)}\t{fmt_num(roi_ps[pp], 6)}\n")
 
             fh.write("NetSOL_percentiles\n")
-            for p in [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
-                fh.write(f"p{int(p*100)}\t{fmt_num(net_ps[p])}\n")
+            for pp in [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
+                fh.write(f"p{int(pp * 100)}\t{fmt_num(net_ps[pp])}\n")
 
             fh.write("HoldSeconds_percentiles\n")
-            for p in [0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
-                fh.write(f"p{int(p*100)}\t{fmt_num(hold_ps[p], 3)}\n")
+            for pp in [0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
+                fh.write(f"p{int(pp * 100)}\t{fmt_num(hold_ps[pp], 3)}\n")
 
             fh.write("EntrySOL_percentiles\n")
-            for p in [0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
-                fh.write(f"p{int(p*100)}\t{fmt_num(entry_ps[p])}\n")
+            for pp in [0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]:
+                fh.write(f"p{int(pp * 100)}\t{fmt_num(entry_ps[pp])}\n")
 
             fh.write(f"max_drawdown_sol\t{fmt_num(max_drawdown)}\n")
             fh.write("trades_per_hour\n")
@@ -557,10 +647,10 @@ def main() -> None:
                 fh.write(f"hour_{h:02d}\t{by_hour.get(h, 0)}\n")
 
             fh.write("loss_cap_signature\n")
-            for p in [0.01, 0.05, 0.10]:
-                fh.write(f"roi_p{int(p*100)}\t{fmt_num(roi_ps[p], 6)}\n")
-            for p in [0.01, 0.05, 0.10]:
-                fh.write(f"net_sol_p{int(p*100)}\t{fmt_num(net_ps[p])}\n")
+            for pp in [0.01, 0.05, 0.10]:
+                fh.write(f"roi_p{int(pp * 100)}\t{fmt_num(roi_ps[pp], 6)}\n")
+            for pp in [0.01, 0.05, 0.10]:
+                fh.write(f"net_sol_p{int(pp * 100)}\t{fmt_num(net_ps[pp])}\n")
 
         open_count = sum(1 for t in by_mint.values() if t.buys_count > 0 and t.sells_count == 0)
 
@@ -574,7 +664,8 @@ def main() -> None:
         print(f"Validation: sell_without_buy={','.join(sorted(sell_without_buy)) if sell_without_buy else '<none>'}")
         print(f"Validation: total_sol_spent={fmt_num(total_sol_spent)}")
         print(f"Validation: total_sol_received={fmt_num(total_sol_received)}")
-        print(f"Validation: null_sol_amount_with_direction={null_sol_amount_with_dir}")
+        print(f"Validation: null_sol_amount_with_direction={null_sol_amount_with_direction}")
+        print(f"Validation: null_sol_direction_with_amount={null_sol_direction_with_amount}")
         if anomaly_by_mint:
             print("Validation: anomaly_details_per_mint")
             for mint in sorted(anomaly_by_mint):
@@ -582,11 +673,8 @@ def main() -> None:
 
         print(f"OK: wrote {trades_path} {equity_path} {dist_path}")
 
-    except ReconstructionError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        print("Schema summary:", file=sys.stderr)
-        for t in sorted(schema):
-            print(f"- {t}: {', '.join(schema[t])}", file=sys.stderr)
+    except ReconstructionError as exc:
+        fail_with_schema_and_enums(schema, flow_vals, sol_vals, str(exc))
         raise SystemExit(1)
     finally:
         conn.close()
