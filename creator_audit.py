@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # CHANGELOG
-# - Tightened creator verification into explicit evidence classes and conservative status rules.
-# - Replaced early-buyer-centric funding logic with creator-centric BFS native transfer traversal.
-# - Split early buy participants from non-buy token receipts and added early_receipts output.
-# - Strengthened creator flow timelines, liquidity/trade detection, and Decimal-based amount handling.
+# - Split creator-linked relationship evidence from creator-linked prefunding evidence.
+# - Added pre-buy timing validation with a configurable prefunding window.
+# - Tightened creator/platform evidence and created-token discovery requirements.
+# - Made liquidity/trade attribution more conservative and NULL-friendly.
 """
 Forensic Solana creator auditor.
 
@@ -55,6 +55,7 @@ class AuditConfig:
     early_buyers_limit: int = 50
     funding_depth: int = 2
     launch_window_minutes: int = 60
+    prefund_max_seconds: int = 3600
     rpc_url: str = DEFAULT_RPC_URL
     refresh: bool = False
     verbose: bool = False
@@ -86,6 +87,9 @@ class CreatorEvidence:
     platform_dev_wallet: str = ""
     evidence_signatures: str = ""
     evidence_class_count: str = "0"
+    evidence_mint_init: str = "FALSE"
+    evidence_metadata_create: str = "FALSE"
+    evidence_platform_create: str = "FALSE"
 
 
 @dataclass
@@ -114,6 +118,11 @@ class CreatedTokenRecord:
     platform_dev_wallet: str = ""
     evidence_signature_list: str = ""
     evidence_class_count: str = "0"
+    evidence_mint_init: str = "FALSE"
+    evidence_metadata_create: str = "FALSE"
+    evidence_platform_create: str = "FALSE"
+    evidence_creator_signer: str = "FALSE"
+    evidence_creator_fee_payer: str = "FALSE"
 
 
 @dataclass
@@ -128,7 +137,10 @@ class FundingEdge:
     slot: str
     block_time_iso: str
     block_time_unix: str
+    block_time: str
     relation_type: str
+    path_root_wallet: str
+    launch_window_included: str
 
 
 @dataclass
@@ -163,6 +175,14 @@ class EarlyBuyerRow:
     received_token_from_creator_linked_wallet: str = "FALSE"
     received_token_signature: str = ""
     funding_evidence_signatures: str = ""
+    linked_from_creator: str = "FALSE"
+    linked_depth: str = ""
+    latest_creator_linked_funding_sig_before_buy: str = ""
+    latest_creator_linked_funding_time_before_buy: str = ""
+    funding_before_buy: str = "FALSE"
+    funding_to_buy_delta_seconds: str = ""
+    directly_prefunded: str = "FALSE"
+    indirectly_prefunded: str = "FALSE"
 
 
 @dataclass
@@ -183,6 +203,7 @@ class FundingGraphResult:
     edges: List[FundingEdge]
     creator_linked_wallet_depth: Dict[str, int]
     path_by_wallet: Dict[str, List[str]]
+    prefund_max_seconds: int
 
 
 @dataclass
@@ -199,10 +220,12 @@ class TokenSummary:
     first_liquidity_signature: str = ""
     first_liquidity_time_iso: str = ""
     first_liquidity_time_unix: str = ""
+    first_liquidity_evidence_class: str = ""
     creation_to_first_liquidity_seconds: str = ""
     first_meaningful_trade_signature: str = ""
     first_meaningful_trade_time_iso: str = ""
     first_meaningful_trade_time_unix: str = ""
+    first_trade_evidence_class: str = ""
     creator_bought_own_token: str = "FALSE"
     creator_sold_own_token: str = "FALSE"
     creator_first_sell_time_iso: str = ""
@@ -210,6 +233,10 @@ class TokenSummary:
     creator_cumulative_sold_raw: str = ""
     creator_directly_funded_early_buyer: str = "FALSE"
     creator_indirectly_funded_early_buyer: str = "FALSE"
+    creator_directly_linked_to_early_buyer: str = "FALSE"
+    creator_indirectly_linked_to_early_buyer: str = "FALSE"
+    creator_directly_prefunded_early_buyer: str = "FALSE"
+    creator_indirectly_prefunded_early_buyer: str = "FALSE"
     early_buyer_received_tokens_from_creator: str = "FALSE"
     multiple_creator_linked_early_buyers: str = "FALSE"
     creator_exited_early: str = "FALSE"
@@ -393,6 +420,12 @@ class ForensicAuditor:
         total_early_buyers = 0
         total_early_receipts = 0
         total_funding_edges = 0
+        total_prefunded_early_buyers = 0
+        total_direct_prefunded = 0
+        total_indirect_prefunded = 0
+        total_without_prior_funding = 0
+        inconclusive_first_liquidity_tokens = 0
+        inconclusive_first_trade_tokens = 0
         verification_evidence_counts = Counter[str]()
 
         if verification:
@@ -429,14 +462,21 @@ class ForensicAuditor:
             total_early_buyers += len(dossier["early_buyers"])
             total_early_receipts += len(dossier["early_receipts"])
             total_funding_edges += len(dossier["funding_edges"])
+            total_prefunded_early_buyers += sum(1 for row in dossier["early_buyers"] if row.directly_prefunded == "TRUE" or row.indirectly_prefunded == "TRUE")
+            total_direct_prefunded += sum(1 for row in dossier["early_buyers"] if row.directly_prefunded == "TRUE")
+            total_indirect_prefunded += sum(1 for row in dossier["early_buyers"] if row.indirectly_prefunded == "TRUE")
+            total_without_prior_funding += sum(1 for row in dossier["early_buyers"] if row.linked_from_creator == "TRUE" and row.funding_before_buy != "TRUE")
             creator_linked_early_buyers += sum(
                 1
                 for row in dossier["early_buyers"]
-                if row.funded_by_creator_directly == "TRUE"
-                or row.funded_by_creator_indirectly == "TRUE"
+                if row.linked_from_creator == "TRUE"
                 or row.received_token_from_creator == "TRUE"
                 or row.received_token_from_creator_linked_wallet == "TRUE"
             )
+            if dossier["summary"].first_liquidity_signature == NULL_VALUE:
+                inconclusive_first_liquidity_tokens += 1
+            if dossier["summary"].first_meaningful_trade_signature == NULL_VALUE:
+                inconclusive_first_trade_tokens += 1
             for row in dossier["early_buyers"]:
                 aggregate_wallets[row.wallet] += 1
                 for wallet in [part for part in row.indirect_path.split(">") if part and part not in {self.config.wallet, row.wallet}]:
@@ -476,6 +516,7 @@ class ForensicAuditor:
                 "early_buyers_limit": self.config.early_buyers_limit,
                 "funding_depth": self.config.funding_depth,
                 "launch_window_minutes": self.config.launch_window_minutes,
+                "prefund_max_seconds": self.config.prefund_max_seconds,
                 "rpc_url": self.config.rpc_url,
                 "refresh": self.config.refresh,
                 "verbose": self.config.verbose,
@@ -489,6 +530,12 @@ class ForensicAuditor:
                 "early_receipts_found": total_early_receipts,
                 "funding_edges_found": total_funding_edges,
                 "creator_linked_early_buyers": creator_linked_early_buyers,
+                "creator_prefunded_early_buyers": total_prefunded_early_buyers,
+                "direct_prefunded_early_buyers": total_direct_prefunded,
+                "indirect_prefunded_early_buyers": total_indirect_prefunded,
+                "early_buyers_without_prior_creator_linked_funding": total_without_prior_funding,
+                "inconclusive_first_liquidity_tokens": inconclusive_first_liquidity_tokens,
+                "inconclusive_first_trade_tokens": inconclusive_first_trade_tokens,
             },
             "creator_verification_evidence_counts": dict(verification_evidence_counts),
             "api_failures": asdict(self.failures),
@@ -636,6 +683,11 @@ class ForensicAuditor:
             platform_dev_wallet=evidence.platform_dev_wallet,
             evidence_signature_list=evidence.evidence_signatures,
             evidence_class_count=evidence.evidence_class_count,
+            evidence_mint_init=evidence.evidence_mint_init,
+            evidence_metadata_create=evidence.evidence_metadata_create,
+            evidence_platform_create=evidence.evidence_platform_create,
+            evidence_creator_signer=evidence.creator_signed_creation_tx,
+            evidence_creator_fee_payer=evidence.creator_fee_payer_on_creation_tx,
         )
 
     def extract_creation_evidence(
@@ -690,6 +742,9 @@ class ForensicAuditor:
             metadata_authority=metadata_authority,
             platform_dev_wallet=platform_dev_wallet,
             evidence_signatures="|".join(sig for sig in transaction.get("signatures", []) if sig),
+            evidence_mint_init=truthy_flag(explicit_mint_init),
+            evidence_metadata_create=truthy_flag(explicit_metadata_create),
+            evidence_platform_create=truthy_flag(bool(platform_dev_wallet)),
         )
         class_count = sum(
             1
@@ -745,8 +800,8 @@ class ForensicAuditor:
         creation_ts = safe_int(token.creation_time_unix)
         launch_window_end = creation_ts + (self.config.launch_window_minutes * 60) if creation_ts else 0
         creator_wallet = token.creator_wallet or self.config.wallet
-        first_liquidity = self.find_first_liquidity_event(mint_txs, token.mint)
-        first_trade = self.find_first_trade_event(mint_txs, token.mint)
+        first_liquidity, first_liquidity_evidence = self.find_first_liquidity_event(mint_txs, token.mint)
+        first_trade, first_trade_evidence = self.find_first_trade_event(mint_txs, token.mint)
         creator_flows = self.extract_creator_flows(token, mint_txs, creation_ts, launch_window_end)
         early_buyers, early_receipts = self.extract_early_participants(token, mint_txs, creation_ts, launch_window_end)
         funding_graph = self.build_creator_funding_graph(token.mint, creator_wallet, creation_ts, launch_window_end, early_buyers)
@@ -786,10 +841,12 @@ class ForensicAuditor:
             first_liquidity_signature=or_null(first_liquidity.get("signature") if first_liquidity else ""),
             first_liquidity_time_iso=or_null(utc_iso(first_liquidity.get("timestamp")) if first_liquidity else ""),
             first_liquidity_time_unix=or_null(str(first_liquidity.get("timestamp", "")) if first_liquidity else ""),
+            first_liquidity_evidence_class=or_null(first_liquidity_evidence),
             creation_to_first_liquidity_seconds=or_null(str((safe_int(first_liquidity.get("timestamp")) - creation_ts)) if first_liquidity and creation_ts else ""),
             first_meaningful_trade_signature=or_null(first_trade.get("signature") if first_trade else ""),
             first_meaningful_trade_time_iso=or_null(utc_iso(first_trade.get("timestamp")) if first_trade else ""),
             first_meaningful_trade_time_unix=or_null(str(first_trade.get("timestamp", "")) if first_trade else ""),
+            first_trade_evidence_class=or_null(first_trade_evidence),
             creator_bought_own_token=truthy_flag(creator_buy),
             creator_sold_own_token=truthy_flag(bool(creator_sell_rows)),
             creator_first_sell_time_iso=or_null(utc_iso(creator_first_sell_ts)),
@@ -797,6 +854,10 @@ class ForensicAuditor:
             creator_cumulative_sold_raw=or_null(creator_cumulative_sold_raw),
             creator_directly_funded_early_buyer=truthy_flag(any(row.funded_by_creator_directly == "TRUE" for row in early_buyers)),
             creator_indirectly_funded_early_buyer=truthy_flag(any(row.funded_by_creator_indirectly == "TRUE" for row in early_buyers)),
+            creator_directly_linked_to_early_buyer=truthy_flag(any(row.funded_by_creator_directly == "TRUE" for row in early_buyers)),
+            creator_indirectly_linked_to_early_buyer=truthy_flag(any(row.funded_by_creator_indirectly == "TRUE" for row in early_buyers)),
+            creator_directly_prefunded_early_buyer=truthy_flag(any(row.directly_prefunded == "TRUE" for row in early_buyers)),
+            creator_indirectly_prefunded_early_buyer=truthy_flag(any(row.indirectly_prefunded == "TRUE" for row in early_buyers)),
             early_buyer_received_tokens_from_creator=truthy_flag(any(row.received_token_from_creator == "TRUE" or row.received_token_from_creator_linked_wallet == "TRUE" for row in early_buyers)),
             multiple_creator_linked_early_buyers=truthy_flag(len(linked_buyers) >= 2),
             creator_exited_early=creator_exit_flag,
@@ -821,23 +882,21 @@ class ForensicAuditor:
             "creator_flows": creator_flows,
         }
 
-    def find_first_liquidity_event(self, txs: Sequence[dict[str, Any]], mint: str) -> Optional[dict[str, Any]]:
+    def find_first_liquidity_event(self, txs: Sequence[dict[str, Any]], mint: str) -> Tuple[Optional[dict[str, Any]], str]:
         for tx in txs:
             tx_type = upper(tx.get("type"))
             source = upper(tx.get("source"))
-            if tx_type in LIQUIDITY_TYPES:
-                return tx
-            if source in DEX_SOURCES and has_token_transfer_for_mint(tx, mint) and is_liquidity_shaped_tx(tx):
-                return tx
-        return None
+            if tx_type in LIQUIDITY_TYPES and source in DEX_SOURCES and has_token_transfer_for_mint(tx, mint):
+                return tx, "explicit_liquidity_tx_type"
+        return None, ""
 
-    def find_first_trade_event(self, txs: Sequence[dict[str, Any]], mint: str) -> Optional[dict[str, Any]]:
+    def find_first_trade_event(self, txs: Sequence[dict[str, Any]], mint: str) -> Tuple[Optional[dict[str, Any]], str]:
         for tx in txs:
             tx_type = upper(tx.get("type"))
             source = upper(tx.get("source"))
             if tx_type in SWAP_TYPES and source in DEX_SOURCES and has_token_transfer_for_mint(tx, mint):
-                return tx
-        return None
+                return tx, "explicit_swap_tx_type"
+        return None, ""
 
     def extract_creator_flows(
         self,
@@ -994,7 +1053,10 @@ class ForensicAuditor:
                         slot=slot,
                         block_time_iso=utc_iso(ts),
                         block_time_unix=str(ts or ""),
+                        block_time=str(ts or ""),
                         relation_type=relation_type,
+                        path_root_wallet=creator_wallet,
+                        launch_window_included="TRUE",
                     )
                     edges[(src, dst, signature, depth_from_creator)] = edge
                     next_path = path_by_wallet[current_wallet] + [dst]
@@ -1015,6 +1077,7 @@ class ForensicAuditor:
             edges=sorted(filtered_edges.values(), key=lambda edge: (safe_int(edge.block_time_unix), edge.signature, edge.src_wallet, edge.dst_wallet)),
             creator_linked_wallet_depth=visited_depth,
             path_by_wallet={wallet: path for wallet, path in path_by_wallet.items() if wallet in buyer_wallets or wallet == creator_wallet},
+            prefund_max_seconds=self.config.prefund_max_seconds,
         )
 
     def detect_creator_token_transfers(
@@ -1093,6 +1156,8 @@ class ForensicAuditor:
             "tokens_where_creator_sold": sum(1 for item in summaries if item.creator_sold_own_token == "TRUE"),
             "tokens_with_creator_directly_funded_early_buyers": sum(1 for item in summaries if item.creator_directly_funded_early_buyer == "TRUE"),
             "tokens_with_creator_indirectly_funded_early_buyers": sum(1 for item in summaries if item.creator_indirectly_funded_early_buyer == "TRUE"),
+            "tokens_with_creator_directly_prefunded_early_buyers": sum(1 for item in summaries if item.creator_directly_prefunded_early_buyer == "TRUE"),
+            "tokens_with_creator_indirectly_prefunded_early_buyers": sum(1 for item in summaries if item.creator_indirectly_prefunded_early_buyer == "TRUE"),
             "tokens_with_creator_linked_wallets_among_early_buyers": sum(1 for item in summaries if item.multiple_creator_linked_early_buyers == "TRUE" or item.early_buyer_received_tokens_from_creator == "TRUE"),
             "median_creation_to_creator_first_sell_seconds": str(int(statistics.median(sell_deltas))) if sell_deltas else NULL_VALUE,
             "median_creation_to_first_liquidity_seconds": str(int(statistics.median(liquidity_deltas))) if liquidity_deltas else NULL_VALUE,
@@ -1158,12 +1223,26 @@ class ForensicAuditor:
                 f"- Tokens where creator sold: {aggregate.get('tokens_where_creator_sold', 0)}",
                 f"- Tokens with direct creator funding of early buyers: {aggregate.get('tokens_with_creator_directly_funded_early_buyers', 0)}",
                 f"- Tokens with indirect creator funding of early buyers: {aggregate.get('tokens_with_creator_indirectly_funded_early_buyers', 0)}",
+                f"- Tokens with direct creator prefunding of early buyers: {aggregate.get('tokens_with_creator_directly_prefunded_early_buyers', 0)}",
+                f"- Tokens with indirect creator prefunding of early buyers: {aggregate.get('tokens_with_creator_indirectly_prefunded_early_buyers', 0)}",
+                "",
+                "Creator-linked relationship evidence:",
+                "- creator-centric native SOL path exists within the launch window",
+                "- token transfer relationships from creator or creator-linked wallets are recorded separately",
+                "",
+                "Creator-linked prefunding evidence:",
+                "- prefunding is only counted when the latest creator-linked incoming native transfer into a buyer is observed before the buyer's first buy and within the prefunding window",
+                "",
+                "Creator token trading evidence:",
+                "- creator buy/sell evidence is limited to explicit swap transactions involving the mint",
+                "",
+                "Creator token transfer evidence:",
+                "- creator token transfer in/out rows are recorded separately from swap buys and sells",
                 "",
                 "Evidence classes used:",
                 "- creator-signed creation transaction",
                 "- creator fee-payer role on creation transaction",
                 "- mint/update/freeze authority matches",
-                "- creator-centric native SOL funding graph edges",
                 "- swap-based early buyer evidence",
                 "- token transfer receipts recorded separately from buys",
                 "",
@@ -1176,6 +1255,8 @@ class ForensicAuditor:
                 "- Results are limited to transactions available from Helius and the configured Solana RPC endpoint.",
                 "- Creator_exited_early is TRUE only when an observed creator sell occurs within the launch window or before the first meaningful trade time if determinable.",
                 "- Creator_current_visible_balance reflects current visible holder data only and is not a reconstructed launch-supply retention measure.",
+                "- Relationship linkage does not by itself prove causal funding; prefunding requires observed creator-linked funding before the buy within the prefunding window.",
+                "- First liquidity and first trade are left NULL when explicit evidence is not available.",
                 f"- API failure counters: helius={self.failures.helius_failures}, rpc={self.failures.rpc_failures}, metadata={self.failures.metadata_failures}, partial={self.failures.partial_failures}.",
             ]
         )
@@ -1206,15 +1287,15 @@ class ForensicAuditor:
             info = parsed.get("info") if isinstance(parsed, dict) else {}
             if program_id == TOKEN_PROGRAM_ID and ix_type in MINT_INIT_TYPES:
                 mint = info.get("mint") if isinstance(info, dict) else None
-                if is_probable_mint(mint):
+                if is_probable_mint_address(mint):
                     candidates.add(mint)
             if program_id == METADATA_PROGRAM_ID and ix_type in CREATE_METADATA_TYPES:
                 mint = info.get("mint") if isinstance(info, dict) else None
-                if is_probable_mint(mint):
+                if is_probable_mint_address(mint):
                     candidates.add(mint)
             if is_platform_create_instruction(instruction):
                 for account in instruction_accounts(instruction):
-                    if is_probable_mint(account):
+                    if is_probable_mint_address(account):
                         candidates.add(account)
         return sorted(candidates)
 
@@ -1243,10 +1324,31 @@ def apply_funding_to_early_buyers(
         depth = funding_graph.creator_linked_wallet_depth.get(row.wallet)
         if depth == 1:
             row.funded_by_creator_directly = "TRUE"
+            row.linked_from_creator = "TRUE"
+            row.linked_depth = "1"
         elif depth and depth > 1:
             row.funded_by_creator_indirectly = "TRUE"
+            row.linked_from_creator = "TRUE"
+            row.linked_depth = str(depth)
             row.indirect_path = ">".join(funding_graph.path_by_wallet.get(row.wallet, []))
+        latest_prior_edge = None
+        buy_ts = safe_int(row.first_buy_time_unix)
+        for edge in sorted(edges_by_wallet.get(row.wallet, []), key=lambda item: safe_int(item.block_time_unix)):
+            edge_ts = safe_int(edge.block_time_unix)
+            if edge_ts and buy_ts and edge_ts < buy_ts:
+                latest_prior_edge = edge
         row.funding_evidence_signatures = "|".join(sorted({edge.signature for edge in edges_by_wallet.get(row.wallet, []) if edge.signature}))
+        if latest_prior_edge is not None:
+            delta_seconds = buy_ts - safe_int(latest_prior_edge.block_time_unix)
+            row.latest_creator_linked_funding_sig_before_buy = latest_prior_edge.signature
+            row.latest_creator_linked_funding_time_before_buy = latest_prior_edge.block_time_iso
+            row.funding_before_buy = "TRUE"
+            row.funding_to_buy_delta_seconds = str(delta_seconds)
+            if delta_seconds <= funding_graph.prefund_max_seconds:
+                if latest_prior_edge.depth_from_creator == 1:
+                    row.directly_prefunded = "TRUE"
+                elif latest_prior_edge.depth_from_creator > 1:
+                    row.indirectly_prefunded = "TRUE"
         link = transfer_links.get(row.wallet)
         if link:
             row.received_token_signature = link.get("signature", "")
@@ -1332,8 +1434,12 @@ def sum_decimal_strings(values: Sequence[str]) -> str:
     return format_decimal(total) if total else ""
 
 
-def is_probable_mint(value: Any) -> bool:
+def is_probable_solana_address(value: Any) -> bool:
     return isinstance(value, str) and 32 <= len(value) <= 44 and value not in {SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, METADATA_PROGRAM_ID}
+
+
+def is_probable_mint_address(value: Any) -> bool:
+    return is_probable_solana_address(value)
 
 
 def instruction_program_id(instruction: Mapping[str, Any]) -> str:
@@ -1348,16 +1454,15 @@ def instruction_accounts(instruction: Mapping[str, Any]) -> List[str]:
 def is_platform_create_instruction(instruction: Mapping[str, Any], mint: Optional[str] = None) -> bool:
     parsed = instruction.get("parsed") if isinstance(instruction, dict) else None
     info = parsed.get("info") if isinstance(parsed, dict) else {}
-    text = json.dumps(instruction, sort_keys=True).lower()
-    if mint and mint not in text:
+    ix_type = parsed.get("type") if isinstance(parsed, dict) else ""
+    if not isinstance(info, dict):
         return False
-    if "pump" in text and "create" in text:
-        return True
-    if "launch" in text and "mint" in text:
-        return True
-    if isinstance(info, dict) and any("mint" in key.lower() for key in info.keys()) and "create" in text:
-        return True
-    return False
+    mint_roles = [value for key, value in info.items() if "mint" in key.lower() and is_probable_mint_address(value)]
+    if mint and mint not in mint_roles:
+        return False
+    explicit_creator_roles = any(is_probable_solana_address(info.get(key)) for key in ("creator", "user", "authority", "payer", "owner"))
+    create_like_type = str(ix_type).lower() in {"create", "create_token", "createmint", "initialize", "initialize2"}
+    return bool(mint_roles and explicit_creator_roles and create_like_type)
 
 
 def extract_platform_dev_wallet(instruction: Mapping[str, Any]) -> str:
@@ -1365,10 +1470,10 @@ def extract_platform_dev_wallet(instruction: Mapping[str, Any]) -> str:
     info = parsed.get("info") if isinstance(parsed, dict) else {}
     for key in ("user", "creator", "owner", "authority", "payer"):
         value = info.get(key) if isinstance(info, dict) else None
-        if is_probable_mint(value):
+        if is_probable_solana_address(value):
             return str(value)
     for account in instruction_accounts(instruction):
-        if is_probable_mint(account):
+        if is_probable_solana_address(account):
             return account
     return ""
 
@@ -1377,13 +1482,9 @@ def detect_platform(mint: str, helius_tx: Mapping[str, Any], rpc_tx: Mapping[str
     source = blank_if_none(helius_tx.get("source"))
     if source:
         return source
-    if mint.endswith("pump"):
-        return "PUMP_FUN"
-    message = ((rpc_tx.get("transaction") or {}).get("message") or {})
-    for account in message.get("accountKeys", []) or []:
-        pubkey = account.get("pubkey") if isinstance(account, dict) else account
-        if isinstance(pubkey, str) and "pump" in pubkey.lower():
-            return "PUMP_FUN_RELATED_ACCOUNT"
+    for instruction in flatten_instructions(((rpc_tx.get("transaction") or {}).get("message") or {}).get("instructions", []) or []):
+        if is_platform_create_instruction(instruction, mint):
+            return blank_if_none(instruction.get("program")) or blank_if_none(instruction_program_id(instruction))
     return ""
 
 
@@ -1431,6 +1532,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> AuditConfig:
     parser.add_argument("--early-buyers-limit", type=int, default=50, help="Number of early buyer wallets to capture per token.")
     parser.add_argument("--funding-depth", type=int, default=2, help="Funding graph depth from creator wallet.")
     parser.add_argument("--launch-window-minutes", type=int, default=60, help="Launch window size in minutes.")
+    parser.add_argument("--prefund-max-seconds", type=int, default=3600, help="Maximum allowed seconds between creator-linked funding and first buy for prefunding classification.")
     parser.add_argument("--rpc-url", default=DEFAULT_RPC_URL, help="Optional Solana RPC URL.")
     parser.add_argument("--refresh", action="store_true", help="Accepted for CLI compatibility. Current implementation always fetches live data.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
@@ -1442,6 +1544,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> AuditConfig:
         early_buyers_limit=args.early_buyers_limit,
         funding_depth=args.funding_depth,
         launch_window_minutes=args.launch_window_minutes,
+        prefund_max_seconds=args.prefund_max_seconds,
         rpc_url=args.rpc_url,
         refresh=args.refresh,
         verbose=args.verbose,
